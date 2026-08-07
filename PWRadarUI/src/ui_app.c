@@ -270,7 +270,7 @@ static void app_draw_toolbar(App* a, UI_Rect r)
     if (ui_button(c, ui_id("tb.step", 0), ui_rect(x, by, 58, 26), "STEP") != 0)
     {
         if (rs == PWR_RUN_RUNNING) { (void)pwr_engine_pause(a->eng); }
-        (void)pwr_engine_step(a->eng, 1u);
+        a->step_pending += 1;
     }
     x += 64;
     if (ui_button(c, ui_id("tb.scan", 0), ui_rect(x, by, 66, 26), "+1 SCAN") != 0)
@@ -278,7 +278,7 @@ static void app_draw_toolbar(App* a, UI_Rect r)
         const uint32_t n = (a->dm.cpi_duration_s > 0.0 && a->dm.scan_period_s > 0.0)
             ? (uint32_t)(a->dm.scan_period_s / a->dm.cpi_duration_s) : 32u;
         if (rs == PWR_RUN_RUNNING) { (void)pwr_engine_pause(a->eng); }
-        (void)pwr_engine_step(a->eng, n);
+        a->step_pending += (int32_t)n;
     }
     x += 72;
     if (ui_button(c, ui_id("tb.reset", 0), ui_rect(x, by, 60, 26), "RESET") != 0)
@@ -640,15 +640,19 @@ static void app_panel_detect(App* a, UI_Rect r)
                   &v, -10.0, 20.0, "%+.1f", 0) != 0)
     { a->cfg.cfar.extra_threshold_db = v; cfar_dirty = 1; }
 
+    /* guard R / train R size the CFAR scratch buffers, so they go through the
+     * deferred reconfigure path (applied once on mouse release) rather than
+     * the per-frame hot path, which would rebuild the engine on every pixel
+     * of slider travel. */
     iv = a->cfg.cfar.guard_range;
     if (ui_slider_int(c, ui_id("cf.gr", 0), ui_stack_row(&s, 24), "guard R",
                       &iv, 0, 16, "%.0f") != 0)
-    { a->cfg.cfar.guard_range = iv; cfar_dirty = 1; }
+    { a->cfg.cfar.guard_range = iv; a->cfg_dirty = 1; }
 
     iv = a->cfg.cfar.train_range;
     if (ui_slider_int(c, ui_id("cf.tr", 0), ui_stack_row(&s, 24), "train R",
                       &iv, 2, 48, "%.0f") != 0)
-    { a->cfg.cfar.train_range = iv; cfar_dirty = 1; }
+    { a->cfg.cfar.train_range = iv; a->cfg_dirty = 1; }
 
     iv = a->cfg.cfar.guard_doppler;
     if (ui_slider_int(c, ui_id("cf.gd", 0), ui_stack_row(&s, 24), "guard D",
@@ -1676,7 +1680,7 @@ static void app_hotkeys(App* a)
             break;
         case 'S':
             (void)pwr_engine_pause(a->eng);
-            (void)pwr_engine_step(a->eng, 1u);
+            a->step_pending += 1;
             break;
         case 'A':
         {
@@ -1684,7 +1688,7 @@ static void app_hotkeys(App* a)
                                 a->dm.scan_period_s > 0.0)
                 ? (uint32_t)(a->dm.scan_period_s / a->dm.cpi_duration_s) : 32u;
             (void)pwr_engine_pause(a->eng);
-            (void)pwr_engine_step(a->eng, n);
+            a->step_pending += (int32_t)n;
             break;
         }
         case 'R': (void)pwr_engine_reset(a->eng); break;
@@ -1754,6 +1758,26 @@ int app_step(App* a)
     {
         if (ev.type == UI_EV_QUIT) { a->running = 0; return 0; }
         ui_ctx_event(&a->ui, &ev);
+    }
+
+    /* ---- queued single-stepping ------------------------------------------
+     *  STEP / +1 SCAN only queue CPIs; they are drained here with a ~20 ms
+     *  budget per UI frame, sized from the measured CPI time.  A full-scan
+     *  step (a couple of hundred CPIs) therefore animates at interactive
+     *  frame rates instead of freezing the console for seconds. */
+    if (pwr_engine_run_state(a->eng) == PWR_RUN_RUNNING)
+    {
+        a->step_pending = 0;
+    }
+    else if (a->step_pending > 0)
+    {
+        const double per_cpi_ms = app_max(a->stats.t_total_ms, 0.1);
+        int32_t chunk = (int32_t)(20.0 / per_cpi_ms);
+        if (chunk < 1)  { chunk = 1; }
+        if (chunk > 32) { chunk = 32; }
+        if (chunk > a->step_pending) { chunk = a->step_pending; }
+        (void)pwr_engine_step(a->eng, (uint32_t)chunk);
+        a->step_pending -= chunk;
     }
 
     /* ---- newest radar frame --------------------------------------------- */

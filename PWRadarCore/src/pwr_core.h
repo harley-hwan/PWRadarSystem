@@ -173,6 +173,15 @@ typedef struct PWR_FrameStore
 
 #define PWR_FRAME_SLOTS 3u
 
+/* Section flags for the hot-setter mailbox (PWR_Engine::pending_flags). */
+#define PWR_PENDING_CFAR        (1u << 0)
+#define PWR_PENDING_CLUSTER     (1u << 1)
+#define PWR_PENDING_TRACKER     (1u << 2)
+#define PWR_PENDING_ENV         (1u << 3)
+#define PWR_PENDING_TIME_SCALE  (1u << 4)
+#define PWR_PENDING_SCAN_RATE   (1u << 5)
+#define PWR_PENDING_STC         (1u << 6)
+
 /* ==========================================================================
  *  6.  The engine
  * ========================================================================== */
@@ -273,14 +282,17 @@ struct PWR_Engine
     PWR_Mutex           frame_lock;
 
     /* ---- threading / control --------------------------------------------
-     *  Two locks, never nested, so the ordering can never deadlock:
-     *    ctrl_lock  guards run_state / quit_flag and backs ctrl_cond, which
-     *               is where the worker parks while stopped or paused.
-     *    proc_lock  is held by the worker for the whole duration of one CPI
-     *               and by every mutator, which makes all reconfiguration
-     *               trivially safe without a single atomic in the hot path.
-     *  Worker order:  ctrl -> (release) -> proc.
-     *  Mutator order: proc -> (release) -> ctrl.
+     *  Lock roles:
+     *    ctrl_lock     guards run_state / quit_flag and backs ctrl_cond,
+     *                  which is where the worker parks while stopped/paused.
+     *    proc_lock     is held by the worker for the whole duration of one
+     *                  CPI and by the full reconfiguration path.
+     *    pending_lock  is a leaf lock guarding the hot-setter mailbox below;
+     *                  it is only ever held for a struct copy.
+     *  Worker order:  ctrl -> (release) -> proc -> pending.
+     *  Mutator order: proc -> (release) -> ctrl, or pending alone.
+     *  pending_lock is never taken before another lock, so the one nesting
+     *  direction (proc -> pending) can never deadlock.
      * ------------------------------------------------------------------- */
     PWR_Thread*         worker;
     PWR_Mutex           ctrl_lock;
@@ -289,6 +301,31 @@ struct PWR_Engine
     volatile int32_t    run_state;       /* PWR_RunState                      */
     volatile int32_t    quit_flag;
     volatile int32_t    worker_alive;
+    /* Fairness gate for proc_lock.  Plain mutexes hand no ownership to
+     * waiters: a saturated worker (load factor > 1) re-acquires proc_lock
+     * within nanoseconds of releasing it, so a blocking mutator can starve
+     * for seconds behind back-to-back CPIs.  Mutators announce themselves
+     * here and the worker yields between CPIs while anyone is queued.  See
+     * pwr_engine_lock_proc_fair(). */
+    volatile int32_t    mutator_waiting;
+
+    /* ---- hot-setter mailbox ---------------------------------------------
+     *  Setters must never wait out a CPI: at high load the worker holds
+     *  proc_lock almost continuously, so a blocking setter would stall a UI
+     *  thread for tens of milliseconds per slider notch.  Instead a setter
+     *  validates, deposits the new section here and returns; the worker
+     *  folds the flagged sections into cfg at the top of the next CPI.  When
+     *  the engine is idle the setter applies immediately via trylock. */
+    PWR_Mutex           pending_lock;
+    PWR_CfarConfig      pending_cfar;
+    PWR_ClusterConfig   pending_cluster;
+    PWR_TrackerConfig   pending_tracker;
+    PWR_SimEnvironment  pending_env;
+    double              pending_time_scale;
+    double              pending_scan_rpm;
+    double              pending_stc_range_m;
+    int32_t             pending_stc_enable;
+    uint32_t            pending_flags;   /* PWR_PENDING_* bitmask             */
 
     /* ---- diagnostics ---------------------------------------------------- */
     PWR_Stats           stats;

@@ -75,6 +75,8 @@ typedef struct PWR_Mutex
 PWR_Status pwr_mutex_init(PWR_Mutex* m);
 void       pwr_mutex_destroy(PWR_Mutex* m);
 void       pwr_mutex_lock(PWR_Mutex* m);
+/** Non-blocking acquire.  Returns 1 when the lock was taken, 0 otherwise. */
+int        pwr_mutex_trylock(PWR_Mutex* m);
 void       pwr_mutex_unlock(PWR_Mutex* m);
 
 /* --------------------------------------------------------------------------

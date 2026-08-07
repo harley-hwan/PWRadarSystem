@@ -136,6 +136,13 @@ void pwr_mutex_lock(PWR_Mutex* m)
     }
 }
 
+int pwr_mutex_trylock(PWR_Mutex* m)
+{
+    if (m == NULL || !m->initialised) { return 0; }
+    return (TryEnterCriticalSection((CRITICAL_SECTION*)m->storage.raw) != 0)
+        ? 1 : 0;
+}
+
 void pwr_mutex_unlock(PWR_Mutex* m)
 {
     if (m != NULL && m->initialised)
@@ -376,6 +383,13 @@ void pwr_mutex_lock(PWR_Mutex* m)
     {
         (void)pthread_mutex_lock((pthread_mutex_t*)m->storage.raw);
     }
+}
+
+int pwr_mutex_trylock(PWR_Mutex* m)
+{
+    if (m == NULL || !m->initialised) { return 0; }
+    return (pthread_mutex_trylock((pthread_mutex_t*)m->storage.raw) == 0)
+        ? 1 : 0;
 }
 
 void pwr_mutex_unlock(PWR_Mutex* m)

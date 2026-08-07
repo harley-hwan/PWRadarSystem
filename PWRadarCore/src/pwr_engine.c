@@ -52,11 +52,29 @@ PWR_EXPORT(const char*) pwr_engine_last_error(const PWR_Engine* eng)
     return (eng != NULL) ? eng->err : "null engine";
 }
 
+/* --------------------------------------------------------------------------
+ *  Fair acquisition of proc_lock for blocking mutators
+ *  ---------------------------------------------------
+ *  CRITICAL_SECTION and pthread mutexes are unfair: releasing one does not
+ *  hand it to a waiter, it merely wakes the waiter, and by the time that
+ *  thread is scheduled a saturated worker has long since re-locked for the
+ *  next CPI.  A mutator blocked in plain pwr_mutex_lock() can therefore lose
+ *  that race for seconds on end.  Raising mutator_waiting first makes the
+ *  worker stand aside between CPIs until the mutator holds the lock, which
+ *  bounds every blocking mutator at one CPI of latency.
+ * ------------------------------------------------------------------------ */
+static void pwr_engine_lock_proc_fair(PWR_Engine* e)
+{
+    (void)pwr_atomic_add_i32(&e->mutator_waiting, 1);
+    pwr_mutex_lock(&e->proc_lock);
+    (void)pwr_atomic_add_i32(&e->mutator_waiting, -1);
+}
+
 PWR_EXPORT(PWR_Status) pwr_engine_set_log(PWR_Engine* eng, PWR_LogFn fn,
                                           void* user, PWR_LogLevel min_level)
 {
     if (eng == NULL) { return PWR_ERR_NULL_POINTER; }
-    pwr_mutex_lock(&eng->proc_lock);
+    pwr_engine_lock_proc_fair(eng);
     eng->log_fn    = fn;
     eng->log_user  = user;
     eng->log_level = (int32_t)min_level;
@@ -669,6 +687,96 @@ static void pwr_engine_process_cpi(PWR_Engine* e)
 }
 
 /* ==========================================================================
+ *  Hot-setter mailbox
+ * ==========================================================================
+ *  See the field block in pwr_core.h.  Setters deposit validated sections
+ *  under pending_lock and return without ever waiting for the worker; the
+ *  sections are folded into the live configuration here, at a CPI boundary,
+ *  with proc_lock already held.
+ * ------------------------------------------------------------------------ */
+
+/* Caller must hold proc_lock. */
+static void pwr_engine_apply_pending_locked(PWR_Engine* e)
+{
+    uint32_t           flags;
+    PWR_CfarConfig     cfar;
+    PWR_ClusterConfig  cluster;
+    PWR_TrackerConfig  tracker;
+    PWR_SimEnvironment env;
+    double             time_scale, scan_rpm, stc_range;
+    int32_t            stc_enable;
+
+    pwr_mutex_lock(&e->pending_lock);
+    flags = e->pending_flags;
+    if (flags == 0u)
+    {
+        pwr_mutex_unlock(&e->pending_lock);
+        return;
+    }
+    cfar       = e->pending_cfar;
+    cluster    = e->pending_cluster;
+    tracker    = e->pending_tracker;
+    env        = e->pending_env;
+    time_scale = e->pending_time_scale;
+    scan_rpm   = e->pending_scan_rpm;
+    stc_range  = e->pending_stc_range_m;
+    stc_enable = e->pending_stc_enable;
+    e->pending_flags = 0u;
+    pwr_mutex_unlock(&e->pending_lock);
+
+    if ((flags & PWR_PENDING_CFAR) != 0u)
+    {
+        /* The reference-window extent sizes the CFAR scratch and is always
+         * routed through the full reconfigure path; never let a stale post
+         * resize it out from under the allocated buffers. */
+        cfar.train_range = e->cfg.cfar.train_range;
+        cfar.guard_range = e->cfg.cfar.guard_range;
+        e->cfg.cfar = cfar;
+    }
+    if ((flags & PWR_PENDING_CLUSTER) != 0u) { e->cfg.cluster = cluster; }
+    if ((flags & PWR_PENDING_TRACKER) != 0u) { e->cfg.tracker = tracker; }
+    if ((flags & PWR_PENDING_ENV) != 0u)
+    {
+        e->sim.env = env;
+        /* Pulse-to-pulse clutter correlation for the new spectrum width. */
+        {
+            const double pri = 1.0 / e->cfg.prf_hz;
+            const double a   = PWR_PI *
+                pwr_maxd(e->sim.env.clutter_spread_hz, 0.0) * pri;
+            e->sim.clutter_rho = pwr_clampd(exp(-2.0 * a * a), 0.0, 0.999999);
+        }
+    }
+    if ((flags & PWR_PENDING_TIME_SCALE) != 0u)
+    {
+        e->cfg.time_scale = time_scale;
+    }
+    if ((flags & PWR_PENDING_SCAN_RATE) != 0u)
+    {
+        e->cfg.scan_rate_rpm = scan_rpm;
+        (void)pwr_config_derive(&e->cfg, &e->dm);
+        e->dm.range_bins = e->n_range;
+    }
+    if ((flags & PWR_PENDING_STC) != 0u)
+    {
+        e->cfg.enable_stc  = stc_enable;
+        e->cfg.stc_range_m = stc_range;
+        pwr_engine_update_stc_gain(e);
+    }
+}
+
+/* Applies posted sections immediately when the engine is idle (stopped,
+ * paused, or driven by pwr_engine_step with no worker).  When the worker is
+ * mid-CPI the trylock fails and the post is picked up at the next boundary. */
+static void pwr_engine_try_apply_pending(PWR_Engine* e)
+{
+    if (pwr_mutex_trylock(&e->proc_lock) != 0)
+    {
+        pwr_engine_apply_pending_locked(e);
+        pwr_mutex_unlock(&e->proc_lock);
+    }
+}
+
+/* ==========================================================================
  *  Worker thread
  * ========================================================================== */
 static void pwr_worker_main(void* arg)
@@ -693,8 +801,16 @@ static void pwr_worker_main(void* arg)
         if (state != PWR_RUN_RUNNING) { continue; }
 
         pwr_mutex_lock(&e->proc_lock);
+        pwr_engine_apply_pending_locked(e);
         pwr_engine_process_cpi(e);
         pwr_mutex_unlock(&e->proc_lock);
+
+        /* Hand proc_lock over when a mutator is queued: without this yield an
+         * overloaded worker re-locks immediately and the mutator starves. */
+        while (pwr_atomic_load_i32(&e->mutator_waiting) > 0 && e->quit_flag == 0)
+        {
+            pwr_plat_yield();
+        }
 
         /* ---- pace to the wall clock ------------------------------------- */
         {
@@ -785,10 +901,11 @@ PWR_EXPORT(PWR_Status) pwr_engine_create(const PWR_RadarConfig* cfg,
     e->sim.next_auto_id = 1;
     snprintf(e->err, sizeof(e->err), "no error");
 
-    if (pwr_mutex_init(&e->frame_lock) != PWR_STATUS_OK ||
-        pwr_mutex_init(&e->ctrl_lock)  != PWR_STATUS_OK ||
-        pwr_mutex_init(&e->proc_lock)  != PWR_STATUS_OK ||
-        pwr_cond_init(&e->ctrl_cond)   != PWR_STATUS_OK)
+    if (pwr_mutex_init(&e->frame_lock)   != PWR_STATUS_OK ||
+        pwr_mutex_init(&e->ctrl_lock)    != PWR_STATUS_OK ||
+        pwr_mutex_init(&e->proc_lock)    != PWR_STATUS_OK ||
+        pwr_mutex_init(&e->pending_lock) != PWR_STATUS_OK ||
+        pwr_cond_init(&e->ctrl_cond)     != PWR_STATUS_OK)
     {
         pwr_engine_destroy(e);
         return PWR_ERR_THREAD;
@@ -819,6 +936,7 @@ PWR_EXPORT(void) pwr_engine_destroy(PWR_Engine* eng)
     pwr_engine_free_buffers(eng);
     pwr_tracker_release(&eng->tracker);
     pwr_cond_destroy(&eng->ctrl_cond);
+    pwr_mutex_destroy(&eng->pending_lock);
     pwr_mutex_destroy(&eng->proc_lock);
     pwr_mutex_destroy(&eng->ctrl_lock);
     pwr_mutex_destroy(&eng->frame_lock);
@@ -878,7 +996,7 @@ PWR_EXPORT(PWR_Status) pwr_engine_reset(PWR_Engine* eng)
 {
     if (eng == NULL) { return PWR_ERR_NULL_POINTER; }
 
-    pwr_mutex_lock(&eng->proc_lock);
+    pwr_engine_lock_proc_fair(eng);
     eng->scenario_time_s = 0.0;
     eng->beam_azimuth_deg = 0.0;
     eng->rti_head = 0u;
@@ -916,7 +1034,8 @@ PWR_EXPORT(PWR_Status) pwr_engine_step(PWR_Engine* eng, uint32_t cpi_count)
     }
     for (i = 0u; i < cpi_count; ++i)
     {
-        pwr_mutex_lock(&eng->proc_lock);
+        pwr_engine_lock_proc_fair(eng);
+        pwr_engine_apply_pending_locked(eng);
         pwr_engine_process_cpi(eng);
         pwr_mutex_unlock(&eng->proc_lock);
     }
@@ -988,9 +1107,12 @@ PWR_EXPORT(PWR_Status) pwr_engine_reconfigure(PWR_Engine* eng,
                       local.enable_pulse_compression !=
                           eng->cfg.enable_pulse_compression) ? 1 : 0;
 
-    pwr_mutex_lock(&eng->proc_lock);
+    pwr_engine_lock_proc_fair(eng);
     {
         const PWR_SimEnvironment env  = eng->sim.env;
+        /* Drain the hot-setter mailbox first so an older post can never
+         * overwrite the full configuration being applied now. */
+        pwr_engine_apply_pending_locked(eng);
         eng->cfg = local;
         (void)pwr_config_derive(&eng->cfg, &eng->dm);
         if (needs_realloc != 0)
@@ -1006,7 +1128,12 @@ PWR_EXPORT(PWR_Status) pwr_engine_reconfigure(PWR_Engine* eng,
                 eng->sim.target_count = n;
                 memcpy(eng->sim.targets, saved, sizeof(saved));
                 pwr_sim_reset(&eng->sim, &eng->cfg);
-                pwr_tracker_reset(&eng->tracker);
+                /* The track file deliberately survives: tracker state is
+                 * metric ENU with no grid indices, so a geometry change does
+                 * not invalidate it.  Tracks left outside the new coverage
+                 * stop receiving plots and retire through the scan-staleness
+                 * rule, while everything still covered keeps its identity
+                 * instead of spending three scans on re-confirmation. */
             }
         }
         else
@@ -1027,6 +1154,9 @@ PWR_EXPORT(PWR_Status) pwr_engine_reconfigure(PWR_Engine* eng,
                 pwr_sim_reset(&eng->sim, &eng->cfg);
             }
         }
+        /* A post that raced in while this reconfiguration held the lock
+         * would otherwise sit until the next CPI - or forever if paused. */
+        pwr_engine_apply_pending_locked(eng);
     }
     pwr_mutex_unlock(&eng->proc_lock);
 
@@ -1048,16 +1178,16 @@ PWR_EXPORT(PWR_Status) pwr_engine_reconfigure(PWR_Engine* eng,
     return PWR_STATUS_OK;
 }
 
-/* Boilerplate bracket for the fine-grained setters: BEGIN NULL-checks the
- * engine and takes proc_lock; END releases it and returns PWR_STATUS_OK.
- * Bodies wrapped in this pair therefore cannot fail - anything fallible must
- * use explicit locking instead (see pwr_engine_set_cfar). */
-#define PWR_HOT_SETTER_BEGIN(engptr)                                          \
-    if ((engptr) == NULL) { return PWR_ERR_NULL_POINTER; }                     \
-    pwr_mutex_lock(&(engptr)->proc_lock)
-#define PWR_HOT_SETTER_END(engptr)                                            \
-    pwr_mutex_unlock(&(engptr)->proc_lock);                                    \
-    return PWR_STATUS_OK
+/* --------------------------------------------------------------------------
+ *  Fine-grained hot setters
+ *  ------------------------
+ *  Non-blocking by contract: each setter clamps/validates with the pure
+ *  config helpers, deposits the new section into the mailbox and returns.
+ *  pwr_engine_try_apply_pending() makes the change effective immediately
+ *  whenever proc_lock happens to be free (stopped, paused, manual stepping);
+ *  otherwise the worker folds it in at the next CPI boundary, so a setter
+ *  never stalls a UI thread for the duration of a CPI.
+ * ------------------------------------------------------------------------ */
 
 PWR_EXPORT(PWR_Status) pwr_engine_set_cfar(PWR_Engine* eng,
                                            const PWR_CfarConfig* cfar)
@@ -1073,36 +1203,50 @@ PWR_EXPORT(PWR_Status) pwr_engine_set_cfar(PWR_Engine* eng,
         return PWR_ERR_CONFIG_INVALID;
     }
     /* The reference-window extent sizes the CFAR scratch, so route a change of
-     * those through the full path; everything else is a scalar swap. */
+     * those through the full path; everything else is a section post. */
     if (probe.cfar.train_range != eng->cfg.cfar.train_range ||
         probe.cfar.guard_range != eng->cfg.cfar.guard_range)
     {
         return pwr_engine_reconfigure(eng, &probe, err, sizeof(err));
     }
-    pwr_mutex_lock(&eng->proc_lock);
-    eng->cfg.cfar = probe.cfar;
-    pwr_mutex_unlock(&eng->proc_lock);
+    pwr_mutex_lock(&eng->pending_lock);
+    eng->pending_cfar   = probe.cfar;
+    eng->pending_flags |= PWR_PENDING_CFAR;
+    pwr_mutex_unlock(&eng->pending_lock);
+    pwr_engine_try_apply_pending(eng);
     return PWR_STATUS_OK;
 }
 
 PWR_EXPORT(PWR_Status) pwr_engine_set_cluster(PWR_Engine* eng,
                                               const PWR_ClusterConfig* cl)
 {
-    if (cl == NULL) { return PWR_ERR_NULL_POINTER; }
-    PWR_HOT_SETTER_BEGIN(eng);
-    eng->cfg.cluster = *cl;
-    (void)pwr_config_clamp(&eng->cfg);
-    PWR_HOT_SETTER_END(eng);
+    PWR_RadarConfig probe;
+    if (eng == NULL || cl == NULL) { return PWR_ERR_NULL_POINTER; }
+    probe = eng->cfg;
+    probe.cluster = *cl;
+    (void)pwr_config_clamp(&probe);
+    pwr_mutex_lock(&eng->pending_lock);
+    eng->pending_cluster = probe.cluster;
+    eng->pending_flags  |= PWR_PENDING_CLUSTER;
+    pwr_mutex_unlock(&eng->pending_lock);
+    pwr_engine_try_apply_pending(eng);
+    return PWR_STATUS_OK;
 }
 
 PWR_EXPORT(PWR_Status) pwr_engine_set_tracker(PWR_Engine* eng,
                                               const PWR_TrackerConfig* tk)
 {
-    if (tk == NULL) { return PWR_ERR_NULL_POINTER; }
-    PWR_HOT_SETTER_BEGIN(eng);
-    eng->cfg.tracker = *tk;
-    (void)pwr_config_clamp(&eng->cfg);
-    PWR_HOT_SETTER_END(eng);
+    PWR_RadarConfig probe;
+    if (eng == NULL || tk == NULL) { return PWR_ERR_NULL_POINTER; }
+    probe = eng->cfg;
+    probe.tracker = *tk;
+    (void)pwr_config_clamp(&probe);
+    pwr_mutex_lock(&eng->pending_lock);
+    eng->pending_tracker = probe.tracker;
+    eng->pending_flags  |= PWR_PENDING_TRACKER;
+    pwr_mutex_unlock(&eng->pending_lock);
+    pwr_engine_try_apply_pending(eng);
+    return PWR_STATUS_OK;
 }
 
 PWR_EXPORT(PWR_Status) pwr_engine_set_mti(PWR_Engine* eng, PWR_MtiMode mode)
@@ -1130,28 +1274,37 @@ PWR_EXPORT(PWR_Status) pwr_engine_set_windows(PWR_Engine* eng,
 
 PWR_EXPORT(PWR_Status) pwr_engine_set_scan_rate(PWR_Engine* eng, double rpm)
 {
-    PWR_HOT_SETTER_BEGIN(eng);
-    eng->cfg.scan_rate_rpm = pwr_clampd(rpm, 0.0, 120.0);
-    (void)pwr_config_derive(&eng->cfg, &eng->dm);
-    eng->dm.range_bins = eng->n_range;
-    PWR_HOT_SETTER_END(eng);
+    if (eng == NULL) { return PWR_ERR_NULL_POINTER; }
+    pwr_mutex_lock(&eng->pending_lock);
+    eng->pending_scan_rpm = pwr_clampd(rpm, 0.0, 120.0);
+    eng->pending_flags   |= PWR_PENDING_SCAN_RATE;
+    pwr_mutex_unlock(&eng->pending_lock);
+    pwr_engine_try_apply_pending(eng);
+    return PWR_STATUS_OK;
 }
 
 PWR_EXPORT(PWR_Status) pwr_engine_set_time_scale(PWR_Engine* eng, double scale)
 {
-    PWR_HOT_SETTER_BEGIN(eng);
-    eng->cfg.time_scale = pwr_clampd(scale, 0.01, 100.0);
-    PWR_HOT_SETTER_END(eng);
+    if (eng == NULL) { return PWR_ERR_NULL_POINTER; }
+    pwr_mutex_lock(&eng->pending_lock);
+    eng->pending_time_scale = pwr_clampd(scale, 0.01, 100.0);
+    eng->pending_flags     |= PWR_PENDING_TIME_SCALE;
+    pwr_mutex_unlock(&eng->pending_lock);
+    pwr_engine_try_apply_pending(eng);
+    return PWR_STATUS_OK;
 }
 
 PWR_EXPORT(PWR_Status) pwr_engine_set_stc(PWR_Engine* eng, int32_t enable,
                                           double range_m)
 {
-    PWR_HOT_SETTER_BEGIN(eng);
-    eng->cfg.enable_stc  = (enable != 0) ? 1 : 0;
-    eng->cfg.stc_range_m = pwr_clampd(range_m, 100.0, 1.0e6);
-    pwr_engine_update_stc_gain(eng);
-    PWR_HOT_SETTER_END(eng);
+    if (eng == NULL) { return PWR_ERR_NULL_POINTER; }
+    pwr_mutex_lock(&eng->pending_lock);
+    eng->pending_stc_enable  = (enable != 0) ? 1 : 0;
+    eng->pending_stc_range_m = pwr_clampd(range_m, 100.0, 1.0e6);
+    eng->pending_flags      |= PWR_PENDING_STC;
+    pwr_mutex_unlock(&eng->pending_lock);
+    pwr_engine_try_apply_pending(eng);
+    return PWR_STATUS_OK;
 }
 
 PWR_EXPORT(PWR_Status) pwr_engine_set_cursor_range_bin(PWR_Engine* eng,
@@ -1171,17 +1324,14 @@ PWR_EXPORT(PWR_Status) pwr_engine_set_cursor_range_bin(PWR_Engine* eng,
 PWR_EXPORT(PWR_Status) pwr_engine_set_environment(PWR_Engine* eng,
                                                   const PWR_SimEnvironment* env)
 {
-    if (env == NULL) { return PWR_ERR_NULL_POINTER; }
-    PWR_HOT_SETTER_BEGIN(eng);
-    eng->sim.env = *env;
-    eng->sim.env.sea_state = pwr_clampd(eng->sim.env.sea_state, 0.0, 9.0);
-    /* Recompute the pulse-to-pulse clutter correlation for the new spectrum. */
-    {
-        const double pri = 1.0 / eng->cfg.prf_hz;
-        const double a   = PWR_PI * pwr_maxd(eng->sim.env.clutter_spread_hz, 0.0) * pri;
-        eng->sim.clutter_rho = pwr_clampd(exp(-2.0 * a * a), 0.0, 0.999999);
-    }
-    PWR_HOT_SETTER_END(eng);
+    if (eng == NULL || env == NULL) { return PWR_ERR_NULL_POINTER; }
+    pwr_mutex_lock(&eng->pending_lock);
+    eng->pending_env = *env;
+    eng->pending_env.sea_state = pwr_clampd(env->sea_state, 0.0, 9.0);
+    eng->pending_flags |= PWR_PENDING_ENV;
+    pwr_mutex_unlock(&eng->pending_lock);
+    pwr_engine_try_apply_pending(eng);
+    return PWR_STATUS_OK;
 }
 
 PWR_EXPORT(PWR_Status) pwr_engine_get_environment(const PWR_Engine* eng,
@@ -1197,7 +1347,7 @@ PWR_EXPORT(PWR_Status) pwr_engine_target_add(PWR_Engine* eng, PWR_SimTarget* tgt
     PWR_Status st = PWR_STATUS_OK;
     if (eng == NULL || tgt == NULL) { return PWR_ERR_NULL_POINTER; }
 
-    pwr_mutex_lock(&eng->proc_lock);
+    pwr_engine_lock_proc_fair(eng);
     if (eng->sim.target_count >= PWR_MAX_SIM_TARGETS)
     {
         st = PWR_ERR_CAPACITY_EXCEEDED;
@@ -1231,7 +1381,7 @@ PWR_EXPORT(PWR_Status) pwr_engine_target_update(PWR_Engine* eng,
     uint32_t i;
     if (eng == NULL || tgt == NULL) { return PWR_ERR_NULL_POINTER; }
 
-    pwr_mutex_lock(&eng->proc_lock);
+    pwr_engine_lock_proc_fair(eng);
     for (i = 0u; i < eng->sim.target_count; ++i)
     {
         if (eng->sim.targets[i].id != tgt->id) { continue; }
@@ -1261,7 +1411,7 @@ PWR_EXPORT(PWR_Status) pwr_engine_target_remove(PWR_Engine* eng, int32_t id)
     uint32_t i;
     if (eng == NULL) { return PWR_ERR_NULL_POINTER; }
 
-    pwr_mutex_lock(&eng->proc_lock);
+    pwr_engine_lock_proc_fair(eng);
     for (i = 0u; i < eng->sim.target_count; ++i)
     {
         if (eng->sim.targets[i].id != id) { continue; }
@@ -1285,11 +1435,13 @@ PWR_EXPORT(PWR_Status) pwr_engine_target_remove(PWR_Engine* eng, int32_t id)
 
 PWR_EXPORT(PWR_Status) pwr_engine_target_clear(PWR_Engine* eng)
 {
-    PWR_HOT_SETTER_BEGIN(eng);
+    if (eng == NULL) { return PWR_ERR_NULL_POINTER; }
+    pwr_engine_lock_proc_fair(eng);
     memset(eng->sim.targets, 0, sizeof(eng->sim.targets));
     memset(eng->sim.state,   0, sizeof(eng->sim.state));
     eng->sim.target_count = 0u;
-    PWR_HOT_SETTER_END(eng);
+    pwr_mutex_unlock(&eng->proc_lock);
+    return PWR_STATUS_OK;
 }
 
 PWR_EXPORT(uint32_t) pwr_engine_target_count(const PWR_Engine* eng)

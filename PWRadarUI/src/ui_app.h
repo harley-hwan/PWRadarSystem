@@ -96,6 +96,10 @@ typedef struct App
     int32_t             tab_ctrl;
     int32_t             tab_right;
     int32_t             scenario;
+    /* CPIs still to be single-stepped.  STEP / +1 SCAN only queue here; the
+     * batch is drained a UI-frame-sized chunk at a time in app_step() so a
+     * full-scan step animates instead of freezing the console. */
+    int32_t             step_pending;
     UI_TableState       tbl_tracks;
     UI_TableState       tbl_plots;
     UI_TableState       tbl_targets;

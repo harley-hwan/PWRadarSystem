@@ -11,8 +11,15 @@
  *    * pwr_engine_frame_acquire / _release     : safe from one consumer
  *                                                thread concurrently with the
  *                                                internal worker.
- *    * every other pwr_engine_* setter         : internally locked, safe from
- *                                                any thread.
+ *    * every other pwr_engine_* setter         : safe from any thread and
+ *                                                non-blocking - the change is
+ *                                                queued and takes effect at
+ *                                                the next CPI boundary, or
+ *                                                immediately when the engine
+ *                                                is idle.  Exceptions that do
+ *                                                block for the current CPI:
+ *                                                pwr_engine_reconfigure and
+ *                                                the target list mutators.
  *
  *  Build-time switches
  *  -------------------
