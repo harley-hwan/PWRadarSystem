@@ -1,0 +1,749 @@
+/* ==========================================================================
+ *  PWRadarSystem - PWRadarCore (internal)
+ *  ------------------------------------------------------------------------
+ *  File    : pwr_track.c
+ *  Purpose : Plot-to-track association and Kalman filtering.
+ *
+ *  Filter
+ *  ------
+ *  Four-state constant-velocity model in a local East-North-Up frame:
+ *      X = [ x  y  vx  vy ]'                (metres, metres/second)
+ *      F = [ I  dt*I ; 0  I ]
+ *      Q = discrete white-noise-acceleration model driven by sigma_a
+ *      H = [ I  0 ]                         (Cartesian position measurement)
+ *
+ *  A polar detection (R, Az) is converted to Cartesian and its covariance is
+ *  transported through the Jacobian
+ *      J = [ sin Az   R cos Az ;  cos Az  -R sin Az ]
+ *  so the down-range and cross-range uncertainties stay correctly shaped -
+ *  the characteristic "banana" gate of a long-range radar.
+ *
+ *  The covariance update uses the Joseph form, which stays symmetric and
+ *  positive definite over long coasting intervals where the plain
+ *  (I - KH)P form is known to lose both.
+ *
+ *  Association
+ *  -----------
+ *  Cost = normalised innovation squared + ln det(S), the standard global
+ *  nearest-neighbour metric; pairs failing the validation gate are marked
+ *  infeasible.  The rectangular assignment problem is then solved exactly by
+ *  the Jonker-Volgenant shortest-augmenting-path algorithm.
+ *
+ *  Rotating-antenna bookkeeping
+ *  ---------------------------
+ *  A track is only *expected* to be seen while the beam is on it.  Every CPI
+ *  all tracks are predicted forward, but only tracks whose predicted azimuth
+ *  falls inside the illuminated arc take part in association and accrue a
+ *  hit or a miss.  Without this, a 2.5 s scan period would coast every track
+ *  to death within a fraction of a revolution.
+ *
+ *  Language: ISO C17
+ * ========================================================================== */
+#include "pwr_core.h"
+
+#include <string.h>
+
+#define PWR_ASSOC_REJECT   1.0e17
+#define PWR_TRAIL_PERIOD_S 0.25
+
+/* ==========================================================================
+ *  Life cycle
+ * ========================================================================== */
+PWR_Status pwr_tracker_init(PWR_Tracker* t)
+{
+    if (t == NULL) { return PWR_ERR_NULL_POINTER; }
+    pwr_tracker_release(t);
+
+    t->cost       = PWR_ALLOC_ARRAY(double,  (size_t)PWR_MAX_TRACKS * PWR_MAX_DETECTIONS);
+    t->row_assign = PWR_ALLOC_ARRAY(int32_t, PWR_MAX_TRACKS);
+    t->col_assign = PWR_ALLOC_ARRAY(int32_t, PWR_MAX_DETECTIONS);
+    t->dual_u     = PWR_ALLOC_ARRAY(double,  PWR_ASSOC_DIM + 2u);
+    t->dual_v     = PWR_ALLOC_ARRAY(double,  PWR_ASSOC_DIM + 2u);
+    t->jv_minv    = PWR_ALLOC_ARRAY(double,  PWR_ASSOC_DIM + 2u);
+    t->jv_way     = PWR_ALLOC_ARRAY(int32_t, PWR_ASSOC_DIM + 2u);
+    t->jv_pcol    = PWR_ALLOC_ARRAY(int32_t, PWR_ASSOC_DIM + 2u);
+    t->jv_used    = PWR_ALLOC_ARRAY(uint8_t, PWR_ASSOC_DIM + 2u);
+    t->cand       = PWR_ALLOC_ARRAY(int32_t, PWR_MAX_TRACKS);
+
+    if (t->cost == NULL || t->row_assign == NULL || t->col_assign == NULL ||
+        t->dual_u == NULL || t->dual_v == NULL || t->jv_minv == NULL ||
+        t->jv_way == NULL || t->jv_pcol == NULL || t->jv_used == NULL ||
+        t->cand == NULL)
+    {
+        pwr_tracker_release(t);
+        return PWR_ERR_OUT_OF_MEMORY;
+    }
+    pwr_tracker_reset(t);
+    return PWR_STATUS_OK;
+}
+
+void pwr_tracker_release(PWR_Tracker* t)
+{
+    if (t == NULL) { return; }
+    PWR_FREE(t->cost);
+    PWR_FREE(t->row_assign);
+    PWR_FREE(t->col_assign);
+    PWR_FREE(t->dual_u);
+    PWR_FREE(t->dual_v);
+    PWR_FREE(t->jv_minv);
+    PWR_FREE(t->jv_way);
+    PWR_FREE(t->jv_pcol);
+    PWR_FREE(t->jv_used);
+    PWR_FREE(t->cand);
+}
+
+void pwr_tracker_reset(PWR_Tracker* t)
+{
+    uint32_t i;
+    if (t == NULL) { return; }
+    for (i = 0u; i < PWR_MAX_TRACKS; ++i)
+    {
+        memset(&t->tracks[i], 0, sizeof(t->tracks[i]));
+        t->tracks[i].state = PWR_TRACK_FREE;
+    }
+    t->next_id       = 1u;
+    t->created_total = 0u;
+    t->deleted_total = 0u;
+    t->cost_rows     = 0u;
+    t->cost_cols     = 0u;
+}
+
+/* ==========================================================================
+ *  Rectangular linear assignment - Jonker-Volgenant shortest augmenting path
+ * ==========================================================================
+ *  Solves min sum cost[i][row_assign[i]] with every row matched to a distinct
+ *  column, assuming rows <= cols.  O(rows^2 * cols).  The wrapper below
+ *  transposes when rows > cols so the caller never has to care.
+ * ------------------------------------------------------------------------ */
+void pwr_assign_jv(const double* cost, uint32_t n, uint32_t m,
+                   uint32_t stride,
+                   int32_t* row_assign,
+                   double* u, double* v, double* minv,
+                   int32_t* way, int32_t* p, uint8_t* used)
+{
+    uint32_t i, j;
+
+    if (cost == NULL || row_assign == NULL || n == 0u || m == 0u || n > m)
+    {
+        if (row_assign != NULL)
+        {
+            for (i = 0u; i < n; ++i) { row_assign[i] = -1; }
+        }
+        return;
+    }
+
+    for (j = 0u; j <= m; ++j) { v[j] = 0.0; p[j] = 0; way[j] = 0; }
+    for (i = 0u; i <= n; ++i) { u[i] = 0.0; }
+
+    for (i = 1u; i <= n; ++i)
+    {
+        uint32_t j0 = 0u;
+        p[0] = (int32_t)i;
+        for (j = 0u; j <= m; ++j) { minv[j] = PWR_ASSOC_INFEASIBLE * 10.0; used[j] = 0u; }
+
+        do
+        {
+            const uint32_t i0 = (uint32_t)p[j0];
+            double delta = PWR_ASSOC_INFEASIBLE * 10.0;
+            uint32_t j1 = 0u;
+
+            used[j0] = 1u;
+            for (j = 1u; j <= m; ++j)
+            {
+                if (used[j] != 0u) { continue; }
+                {
+                    const double cur = cost[(size_t)(i0 - 1u) * stride + (j - 1u)]
+                                     - u[i0] - v[j];
+                    if (cur < minv[j]) { minv[j] = cur; way[j] = (int32_t)j0; }
+                    if (minv[j] < delta) { delta = minv[j]; j1 = j; }
+                }
+            }
+            if (j1 == 0u) { break; }   /* no reachable column: unmatched row  */
+
+            for (j = 0u; j <= m; ++j)
+            {
+                if (used[j] != 0u)
+                {
+                    u[(uint32_t)p[j]] += delta;
+                    v[j]              -= delta;
+                }
+                else
+                {
+                    minv[j] -= delta;
+                }
+            }
+            j0 = j1;
+        } while (p[j0] != 0);
+
+        if (p[j0] == 0)
+        {
+            /* Augment along the alternating path. */
+            while (j0 != 0u)
+            {
+                const uint32_t j1 = (uint32_t)way[j0];
+                p[j0] = p[j1];
+                j0 = j1;
+            }
+        }
+    }
+
+    for (i = 0u; i < n; ++i) { row_assign[i] = -1; }
+    for (j = 1u; j <= m; ++j)
+    {
+        if (p[j] > 0 && (uint32_t)p[j] <= n)
+        {
+            row_assign[(uint32_t)p[j] - 1u] = (int32_t)(j - 1u);
+        }
+    }
+}
+
+/* ==========================================================================
+ *  Kalman primitives
+ * ========================================================================== */
+static void pwr_kf_predict(PWR_TrackInternal* tk, double dt, double sigma_a)
+{
+    const double dt2 = dt * dt;
+    const double dt3 = dt2 * dt;
+    const double dt4 = dt2 * dt2;
+    const double q   = sigma_a * sigma_a;
+    double F[16], T[16], P2[16], Q[16];
+    uint32_t i;
+
+    if (dt <= 0.0) { return; }
+
+    /* X = F X */
+    tk->X[0] += tk->X[2] * dt;
+    tk->X[1] += tk->X[3] * dt;
+
+    memset(F, 0, sizeof(F));
+    F[0] = 1.0; F[2]  = dt;
+    F[5] = 1.0; F[7]  = dt;
+    F[10] = 1.0;
+    F[15] = 1.0;
+
+    memset(Q, 0, sizeof(Q));
+    Q[0]  = q * dt4 / 4.0;  Q[2]  = q * dt3 / 2.0;
+    Q[5]  = q * dt4 / 4.0;  Q[7]  = q * dt3 / 2.0;
+    Q[8]  = q * dt3 / 2.0;  Q[10] = q * dt2;
+    Q[13] = q * dt3 / 2.0;  Q[15] = q * dt2;
+
+    pwr_mat_mul(F, tk->P, T, 4u);        /* T  = F P    */
+    pwr_mat_mul_t(T, F, P2, 4u);         /* P2 = F P F' */
+    for (i = 0u; i < 16u; ++i) { tk->P[i] = P2[i] + Q[i]; }
+    pwr_mat_symmetrise(tk->P, 4u);
+}
+
+/* Cartesian measurement covariance from the polar accuracies. */
+static void pwr_meas_cov(double range_m, double az_deg,
+                         double sig_r, double sig_az_deg, double* R2)
+{
+    const double az   = pwr_deg_to_rad(az_deg);
+    const double s    = sin(az);
+    const double c    = cos(az);
+    const double sr2  = sig_r * sig_r;
+    const double sc2  = (range_m * pwr_deg_to_rad(sig_az_deg)) *
+                        (range_m * pwr_deg_to_rad(sig_az_deg));
+    R2[0] = sr2 * s * s + sc2 * c * c;
+    R2[1] = (sr2 - sc2) * s * c;
+    R2[2] = R2[1];
+    R2[3] = sr2 * c * c + sc2 * s * s;
+}
+
+/* Returns the normalised innovation squared, or a negative value on a
+ * numerically singular innovation covariance. */
+static double pwr_kf_gate(const PWR_TrackInternal* tk, const double* z,
+                          const double* R2, double* out_Sinv, double* out_logdet)
+{
+    double S[4], Sinv[4], d[2];
+    S[0] = tk->P[0]  + R2[0];
+    S[1] = tk->P[1]  + R2[1];
+    S[2] = tk->P[4]  + R2[2];
+    S[3] = tk->P[5]  + R2[3];
+    if (pwr_mat2_inv(S, Sinv) != PWR_STATUS_OK) { return -1.0; }
+    d[0] = z[0] - tk->X[0];
+    d[1] = z[1] - tk->X[1];
+    if (out_Sinv != NULL) { memcpy(out_Sinv, Sinv, sizeof(Sinv)); }
+    if (out_logdet != NULL)
+    {
+        const double det = S[0] * S[3] - S[1] * S[2];
+        *out_logdet = (det > 0.0) ? log(det) : 0.0;
+    }
+    return pwr_mahalanobis2(Sinv, d);
+}
+
+static void pwr_kf_update(PWR_TrackInternal* tk, const double* z, const double* R2)
+{
+    double S[4], Sinv[4], K[8], d[2], IKH[16], T[16], P2[16], KR[8];
+    uint32_t i, j, k;
+
+    S[0] = tk->P[0] + R2[0];
+    S[1] = tk->P[1] + R2[1];
+    S[2] = tk->P[4] + R2[2];
+    S[3] = tk->P[5] + R2[3];
+    if (pwr_mat2_inv(S, Sinv) != PWR_STATUS_OK) { return; }
+
+    /* K = P H' Sinv,  H = [I 0]  ->  P H' is the first two columns of P. */
+    for (i = 0u; i < 4u; ++i)
+    {
+        const double p0 = tk->P[i * 4u + 0u];
+        const double p1 = tk->P[i * 4u + 1u];
+        K[i * 2u + 0u] = p0 * Sinv[0] + p1 * Sinv[2];
+        K[i * 2u + 1u] = p0 * Sinv[1] + p1 * Sinv[3];
+    }
+
+    d[0] = z[0] - tk->X[0];
+    d[1] = z[1] - tk->X[1];
+    for (i = 0u; i < 4u; ++i)
+    {
+        tk->X[i] += K[i * 2u + 0u] * d[0] + K[i * 2u + 1u] * d[1];
+    }
+
+    /* Joseph form: P = (I-KH) P (I-KH)' + K R K' */
+    memset(IKH, 0, sizeof(IKH));
+    for (i = 0u; i < 4u; ++i) { IKH[i * 4u + i] = 1.0; }
+    for (i = 0u; i < 4u; ++i)
+    {
+        IKH[i * 4u + 0u] -= K[i * 2u + 0u];
+        IKH[i * 4u + 1u] -= K[i * 2u + 1u];
+    }
+    pwr_mat_mul(IKH, tk->P, T, 4u);
+    pwr_mat_mul_t(T, IKH, P2, 4u);
+
+    /* KR = K * R2 (4x2 * 2x2) */
+    for (i = 0u; i < 4u; ++i)
+    {
+        KR[i * 2u + 0u] = K[i * 2u + 0u] * R2[0] + K[i * 2u + 1u] * R2[2];
+        KR[i * 2u + 1u] = K[i * 2u + 0u] * R2[1] + K[i * 2u + 1u] * R2[3];
+    }
+    for (i = 0u; i < 4u; ++i)
+    {
+        for (j = 0u; j < 4u; ++j)
+        {
+            double acc = P2[i * 4u + j];
+            for (k = 0u; k < 2u; ++k)
+            {
+                acc += KR[i * 2u + k] * K[j * 2u + k];
+            }
+            tk->P[i * 4u + j] = acc;
+        }
+    }
+    pwr_mat_symmetrise(tk->P, 4u);
+}
+
+/* ==========================================================================
+ *  Classification heuristic (kinematic only)
+ * ========================================================================== */
+static int32_t pwr_classify(double speed_mps)
+{
+    if (speed_mps < 18.0)  { return PWR_CLASS_SURFACE; }
+    if (speed_mps < 60.0)  { return PWR_CLASS_ROTARY;  }
+    if (speed_mps < 120.0) { return PWR_CLASS_UAV;     }
+    if (speed_mps < 400.0) { return PWR_CLASS_AIR;     }
+    return PWR_CLASS_MISSILE;
+}
+
+static uint32_t pwr_popcount32(uint32_t v)
+{
+    v = v - ((v >> 1u) & 0x55555555u);
+    v = (v & 0x33333333u) + ((v >> 2u) & 0x33333333u);
+    v = (v + (v >> 4u)) & 0x0F0F0F0Fu;
+    return (v * 0x01010101u) >> 24u;
+}
+
+static void pwr_trail_push(PWR_TrackInternal* tk, double time_s)
+{
+    if (tk->trail_count > 0u && (time_s - tk->trail_last_time_s) < PWR_TRAIL_PERIOD_S)
+    {
+        /* Keep the newest point fresh without growing the trail. */
+        tk->trail[tk->trail_head].x_m = (float)tk->X[0];
+        tk->trail[tk->trail_head].y_m = (float)tk->X[1];
+        return;
+    }
+    tk->trail_head = (tk->trail_count == 0u)
+                   ? 0u
+                   : ((tk->trail_head + 1u) % PWR_TRACK_TRAIL_LEN);
+    tk->trail[tk->trail_head].x_m = (float)tk->X[0];
+    tk->trail[tk->trail_head].y_m = (float)tk->X[1];
+    if (tk->trail_count < PWR_TRACK_TRAIL_LEN) { ++tk->trail_count; }
+    tk->trail_last_time_s = time_s;
+}
+
+/* ==========================================================================
+ *  Track initiation
+ * ========================================================================== */
+static void pwr_track_init_from_detection(PWR_Tracker* tr,
+                                          const PWR_Detection* det,
+                                          const PWR_TrackerConfig* cfg,
+                                          double time_s)
+{
+    uint32_t slot = PWR_MAX_TRACKS;
+    uint32_t i;
+    PWR_TrackInternal* tk;
+    double R2[4];
+    const double az = pwr_deg_to_rad(det->azimuth_deg);
+
+    for (i = 0u; i < PWR_MAX_TRACKS; ++i)
+    {
+        if (tr->tracks[i].state == PWR_TRACK_FREE) { slot = i; break; }
+    }
+    if (slot == PWR_MAX_TRACKS) { return; }
+
+    tk = &tr->tracks[slot];
+    memset(tk, 0, sizeof(*tk));
+
+    tk->X[0] = det->range_m * sin(az);
+    tk->X[1] = det->range_m * cos(az);
+    /* Seed the velocity with the measured range rate projected on the line of
+     * sight: it is the only velocity information a single plot carries. */
+    tk->X[2] = det->radial_velocity_mps * sin(az);
+    tk->X[3] = det->radial_velocity_mps * cos(az);
+
+    pwr_meas_cov(det->range_m, det->azimuth_deg,
+                 cfg->meas_sigma_range_m, cfg->meas_sigma_azimuth_deg, R2);
+    tk->P[0]  = R2[0];  tk->P[1]  = R2[1];
+    tk->P[4]  = R2[2];  tk->P[5]  = R2[3];
+    tk->P[10] = cfg->init_velocity_sigma * cfg->init_velocity_sigma;
+    tk->P[15] = cfg->init_velocity_sigma * cfg->init_velocity_sigma;
+
+    tk->id                  = tr->next_id++;
+    tk->state               = PWR_TRACK_TENTATIVE;
+    tk->hits                = 1u;
+    tk->update_attempts     = 1u;
+    tk->history_bits        = 1u;
+    tk->snr_db              = (float)det->snr_db;
+    tk->first_time_s        = time_s;
+    tk->last_meas_time_s    = time_s;
+    tk->last_update_time_s  = time_s;
+    tk->last_predict_time_s = time_s;
+    tk->radial_velocity_mps = det->radial_velocity_mps;
+    tk->score               = det->snr_db;
+    tk->target_class        = PWR_CLASS_UNKNOWN;
+    pwr_trail_push(tk, time_s);
+    ++tr->created_total;
+}
+
+/* ==========================================================================
+ *  Per-CPI tracker update
+ * ========================================================================== */
+void pwr_tracker_update(struct PWR_Engine* e)
+{
+    PWR_Tracker* const tr = &e->tracker;
+    const PWR_TrackerConfig* const cfg = &e->cfg.tracker;
+    const double now = e->scenario_time_s;
+    const double beam = e->beam_azimuth_deg;
+    /* Illuminated arc: the mainlobe plus a margin for prediction error. */
+    const double arc = 0.5 * e->cfg.azimuth_beamwidth_deg * 1.6 +
+                       0.5 * e->dm.cpi_duration_s * 6.0 * e->cfg.scan_rate_rpm;
+    /* Zero when the antenna is staring, which disables the scan-based
+     * staleness rule and leaves the per-CPI M-of-N logic in sole charge. */
+    const double scan_period = e->dm.scan_period_s;
+    uint32_t n_cand = 0u;
+    uint32_t i, c;
+
+    if (cfg->enable == 0)
+    {
+        for (i = 0u; i < PWR_MAX_TRACKS; ++i)
+        {
+            if (tr->tracks[i].state != PWR_TRACK_FREE)
+            {
+                tr->tracks[i].state = PWR_TRACK_FREE;
+                ++tr->deleted_total;
+            }
+        }
+        return;
+    }
+
+    /* ---- 1. predict every live track to the current time ---------------- */
+    for (i = 0u; i < PWR_MAX_TRACKS; ++i)
+    {
+        PWR_TrackInternal* tk = &tr->tracks[i];
+        double dt;
+        if (tk->state == PWR_TRACK_FREE) { continue; }
+        dt = now - tk->last_predict_time_s;
+        if (dt > 0.0)
+        {
+            pwr_kf_predict(tk, dt, cfg->process_noise_accel);
+            tk->last_predict_time_s = now;
+        }
+        /* Kinematic plausibility guard: a diverged filter is terminated
+         * rather than allowed to poison the association. */
+        {
+            const double sp = sqrt(tk->X[2] * tk->X[2] + tk->X[3] * tk->X[3]);
+            if (!(sp <= cfg->max_speed_mps * 2.0) ||
+                !(tk->P[0] < 1.0e12) || !(tk->P[5] < 1.0e12))
+            {
+                tk->state = PWR_TRACK_FREE;
+                ++tr->deleted_total;
+                continue;
+            }
+        }
+        /* ---- 2. scan-based staleness ------------------------------------
+         *  With a rotating antenna a track only accrues hits and misses while
+         *  the beam is on it, so the M-of-N counters alone can never retire a
+         *  track that the beam has left for good - for instance a track seeded
+         *  by a single false alarm.  Elapsed time since the last real
+         *  measurement, expressed in scan periods, closes that gap. */
+        if (scan_period > 0.0)
+        {
+            const double missed = (now - tk->last_meas_time_s) / scan_period;
+            const double kill_confirmed =
+                pwr_maxd(2.0, 0.5 * (double)cfg->delete_misses);
+            if (tk->state == PWR_TRACK_TENTATIVE && missed > 1.5)
+            {
+                tk->state = PWR_TRACK_FREE;
+                ++tr->deleted_total;
+                continue;
+            }
+            if (missed > kill_confirmed)
+            {
+                tk->state = PWR_TRACK_FREE;
+                ++tr->deleted_total;
+                continue;
+            }
+            if (tk->state == PWR_TRACK_CONFIRMED && missed > 1.0)
+            {
+                tk->state = PWR_TRACK_COASTING;
+            }
+        }
+
+        /* ---- 3. build the in-beam candidate list ------------------------ */
+        {
+            const double az = pwr_wrap360(pwr_rad_to_deg(atan2(tk->X[0], tk->X[1])));
+            if (fabs(pwr_angle_diff(az, beam)) <= arc && n_cand < PWR_MAX_TRACKS)
+            {
+                tr->cand[n_cand++] = (int32_t)i;
+            }
+        }
+    }
+
+    /* ---- 4. cost matrix ------------------------------------------------- */
+    {
+        const uint32_t nd = pwr_minu(e->detection_count, PWR_MAX_DETECTIONS);
+        const double gate2 = cfg->gate_sigma * cfg->gate_sigma;
+        double R2[4];
+
+        tr->cost_rows = n_cand;
+        tr->cost_cols = nd;
+
+        for (c = 0u; c < nd; ++c) { tr->col_assign[c] = -1; }
+        for (i = 0u; i < n_cand; ++i) { tr->row_assign[i] = -1; }
+
+        if (n_cand > 0u && nd > 0u)
+        {
+            for (i = 0u; i < n_cand; ++i)
+            {
+                PWR_TrackInternal* tk = &tr->tracks[tr->cand[i]];
+                for (c = 0u; c < nd; ++c)
+                {
+                    const PWR_Detection* det = &e->detections[c];
+                    const double az = pwr_deg_to_rad(det->azimuth_deg);
+                    double z[2], d2, logdet = 0.0;
+                    double cost = PWR_ASSOC_INFEASIBLE;
+
+                    z[0] = det->range_m * sin(az);
+                    z[1] = det->range_m * cos(az);
+
+                    /* Cheap rectangular pre-gate before the quadratic form. */
+                    if (fabs(z[0] - tk->X[0]) <= cfg->gate_max_range_m &&
+                        fabs(z[1] - tk->X[1]) <= cfg->gate_max_range_m)
+                    {
+                        pwr_meas_cov(det->range_m, det->azimuth_deg,
+                                     cfg->meas_sigma_range_m,
+                                     cfg->meas_sigma_azimuth_deg, R2);
+                        d2 = pwr_kf_gate(tk, z, R2, NULL, &logdet);
+                        if (d2 >= 0.0 && d2 <= gate2)
+                        {
+                            int ok = 1;
+                            if (cfg->use_doppler_in_gate != 0)
+                            {
+                                /* Predicted range rate along the plot's line
+                                 * of sight versus the measured one. */
+                                const double ux = sin(az), uy = cos(az);
+                                const double pred = tk->X[2] * ux + tk->X[3] * uy;
+                                const double dv = fabs(pred - det->radial_velocity_mps);
+                                const double lim = cfg->gate_sigma *
+                                    (cfg->meas_sigma_velocity_mps +
+                                     sqrt(pwr_maxd(tk->P[10] + tk->P[15], 0.0)));
+                                if (dv > lim) { ok = 0; }
+                            }
+                            if (ok != 0) { cost = d2 + logdet; }
+                        }
+                    }
+                    tr->cost[(size_t)i * nd + c] = cost;
+                }
+            }
+
+            /* The exact solver requires rows <= cols.  When there are more
+             * in-beam tracks than plots the greedy solver takes over: at these
+             * sizes (a handful of each) the two agree almost always, and the
+             * difference costs at most one deferred association. */
+            if (cfg->assoc_mode == PWR_ASSOC_GLOBAL && n_cand <= nd)
+            {
+                pwr_assign_jv(tr->cost, n_cand, nd, nd, tr->row_assign,
+                              tr->dual_u, tr->dual_v, tr->jv_minv,
+                              tr->jv_way, tr->jv_pcol, tr->jv_used);
+            }
+            else
+            {
+                /* Greedy nearest neighbour: repeatedly take the globally
+                 * cheapest feasible pair. */
+                for (;;)
+                {
+                    double best = PWR_ASSOC_REJECT;
+                    uint32_t bi = 0u, bj = 0u;
+                    int found = 0;
+                    for (i = 0u; i < n_cand; ++i)
+                    {
+                        if (tr->row_assign[i] >= 0) { continue; }
+                        for (c = 0u; c < nd; ++c)
+                        {
+                            if (tr->col_assign[c] >= 0) { continue; }
+                            if (tr->cost[(size_t)i * nd + c] < best)
+                            {
+                                best = tr->cost[(size_t)i * nd + c];
+                                bi = i; bj = c; found = 1;
+                            }
+                        }
+                    }
+                    if (found == 0) { break; }
+                    tr->row_assign[bi] = (int32_t)bj;
+                    tr->col_assign[bj] = (int32_t)bi;
+                }
+            }
+
+            /* Drop assignments that landed on an infeasible pair and rebuild
+             * the column map from the (possibly JV-produced) row map. */
+            for (c = 0u; c < nd; ++c) { tr->col_assign[c] = -1; }
+            for (i = 0u; i < n_cand; ++i)
+            {
+                const int32_t j = tr->row_assign[i];
+                if (j < 0) { continue; }
+                if (tr->cost[(size_t)i * nd + (uint32_t)j] >= PWR_ASSOC_REJECT)
+                {
+                    tr->row_assign[i] = -1;
+                    continue;
+                }
+                tr->col_assign[j] = (int32_t)i;
+            }
+        }
+
+        /* ---- 5. update / miss ------------------------------------------- */
+        for (i = 0u; i < n_cand; ++i)
+        {
+            PWR_TrackInternal* tk = &tr->tracks[tr->cand[i]];
+            const int32_t j = (nd > 0u) ? tr->row_assign[i] : -1;
+
+            ++tk->update_attempts;
+            tk->history_bits <<= 1u;
+
+            if (j >= 0)
+            {
+                const PWR_Detection* det = &e->detections[j];
+                const double az = pwr_deg_to_rad(det->azimuth_deg);
+                double z[2];
+                double d2, Sinv[4];
+
+                z[0] = det->range_m * sin(az);
+                z[1] = det->range_m * cos(az);
+                pwr_meas_cov(det->range_m, det->azimuth_deg,
+                             cfg->meas_sigma_range_m,
+                             cfg->meas_sigma_azimuth_deg, R2);
+                d2 = pwr_kf_gate(tk, z, R2, Sinv, NULL);
+                tk->innovation_norm = (float)((d2 > 0.0) ? sqrt(d2) : 0.0);
+                pwr_kf_update(tk, z, R2);
+
+                tk->history_bits      |= 1u;
+                ++tk->hits;
+                tk->consecutive_misses = 0u;
+                tk->snr_db = (float)(0.7 * (double)tk->snr_db +
+                                     0.3 * (double)det->snr_db);
+                tk->last_meas_time_s   = now;
+                tk->last_update_time_s = now;
+                tk->radial_velocity_mps = det->radial_velocity_mps;
+                tk->score = pwr_ewma(tk->score, (double)det->snr_db, 0.3);
+                if (tk->state == PWR_TRACK_COASTING)
+                {
+                    tk->state = PWR_TRACK_CONFIRMED;
+                }
+            }
+            else
+            {
+                ++tk->misses;
+                ++tk->consecutive_misses;
+                tk->score -= 1.5;
+            }
+
+            /* ---- M-of-N confirmation and termination -------------------- */
+            {
+                const uint32_t mask = (cfg->confirm_n >= 32)
+                    ? 0xFFFFFFFFu : ((1u << (uint32_t)cfg->confirm_n) - 1u);
+                const uint32_t recent = pwr_popcount32(tk->history_bits & mask);
+
+                if (tk->state == PWR_TRACK_TENTATIVE &&
+                    recent >= (uint32_t)cfg->confirm_m)
+                {
+                    tk->state = PWR_TRACK_CONFIRMED;
+                }
+                if (tk->consecutive_misses >= (uint32_t)cfg->delete_misses ||
+                    (tk->state == PWR_TRACK_TENTATIVE &&
+                     tk->consecutive_misses >= (uint32_t)cfg->coast_misses &&
+                     tk->hits < 2u))
+                {
+                    tk->state = PWR_TRACK_FREE;
+                    ++tr->deleted_total;
+                }
+                else if (tk->state == PWR_TRACK_CONFIRMED &&
+                         tk->consecutive_misses >= (uint32_t)cfg->coast_misses)
+                {
+                    tk->state = PWR_TRACK_COASTING;
+                }
+            }
+
+            if (tk->state != PWR_TRACK_FREE)
+            {
+                const double sp = sqrt(tk->X[2] * tk->X[2] + tk->X[3] * tk->X[3]);
+                tk->target_class = pwr_classify(sp);
+                pwr_trail_push(tk, now);
+            }
+        }
+
+        /* ---- 6. initiate tracks from unassigned plots --------------------
+         *  A plot inside the initiation-inhibit radius of any live track is
+         *  discarded rather than promoted.  A strong target routinely yields
+         *  more than one plot per dwell (sidelobe residue, an extended
+         *  scatterer, a split cluster) and only one of them can be assigned;
+         *  without this guard every extra plot would seed a duplicate track. */
+        {
+            const double inhibit = (double)cfg->init_inhibit_m;
+            const double inhibit2 = inhibit * inhibit;
+            for (c = 0u; c < nd; ++c)
+            {
+                const PWR_Detection* det = &e->detections[c];
+                double zx, zy;
+                int blocked = 0;
+
+                if (tr->col_assign[c] >= 0) { continue; }
+                if (det->snr_db < (float)e->cfg.cluster.min_snr_db) { continue; }
+
+                zx = det->range_m * sin(pwr_deg_to_rad(det->azimuth_deg));
+                zy = det->range_m * cos(pwr_deg_to_rad(det->azimuth_deg));
+                if (inhibit > 0.0)
+                {
+                    for (i = 0u; i < PWR_MAX_TRACKS; ++i)
+                    {
+                        const PWR_TrackInternal* tk = &tr->tracks[i];
+                        double dx, dy;
+                        if (tk->state == PWR_TRACK_FREE) { continue; }
+                        dx = zx - tk->X[0];
+                        dy = zy - tk->X[1];
+                        if (dx * dx + dy * dy < inhibit2) { blocked = 1; break; }
+                    }
+                }
+                if (blocked == 0)
+                {
+                    pwr_track_init_from_detection(tr, det, cfg, now);
+                }
+            }
+        }
+    }
+}

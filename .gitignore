@@ -1,0 +1,64 @@
+# ---- build outputs -------------------------------------------------------
+build/
+build-mingw/
+out/
+bin/
+obj/
+*.o
+*.d
+*.so
+*.so.*
+*.a
+*.dll
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.idb
+
+# ---- Visual Studio -------------------------------------------------------
+.vs/
+*.user
+*.suo
+*.aps
+*.VC.db
+*.VC.opendb
+*.sln.docstates
+Debug/
+Release/
+x64/
+x86/
+
+# ---- CMake ---------------------------------------------------------------
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+
+# ---- CMake generates the solution and project files; never commit them ---
+# The .sln / .vcxproj under build/ are outputs of `cmake -G "Visual Studio 17
+# 2022"`.  Hand-editing or committing them is what broke this project once
+# already: CMakeLists.txt is the single source of truth.
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# ---- editors and tools ---------------------------------------------------
+.cache/
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# ---- python bytecode (tools/) --------------------------------------------
+__pycache__/
+*.py[cod]
+
+# ---- captures and packaging ----------------------------------------------
+*.ppm
+*.exe

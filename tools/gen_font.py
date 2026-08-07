@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+# ==========================================================================
+#  PWRadarSystem - font atlas generator
+#  ------------------------------------------------------------------------
+#  Rasterises a handful of font faces into 8-bit alpha atlases and emits them
+#  as a C source file.  The generated file is checked in, so building
+#  PWRadarUI needs no font library, no font files and no Python: the console
+#  stays a pure C program with zero external dependencies, exactly as the
+#  project requires, while still rendering properly antialiased,
+#  correctly-kerned text.
+#
+#  Run this only when a face, a size or the glyph set has to change:
+#
+#      python3 tools/gen_font.py PWRadarUI/src/ui_font_data.c
+#
+#  Requires Pillow and the DejaVu family (both present on any normal Linux
+#  developer image).  Never invoked by the build.
+# ==========================================================================
+import sys
+from PIL import Image, ImageDraw, ImageFont
+
+FACES = [
+    ("UI_FONT_SMALL", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",         11),
+    ("UI_FONT_BODY",  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",         13),
+    ("UI_FONT_BOLD",  "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",    13),
+    ("UI_FONT_MONO",  "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",     12),
+]
+
+# ASCII 32..126 followed by the symbols an engineering console actually needs.
+EXTRA = [
+    0x00B0,  # degree
+    0x00B1,  # plus-minus
+    0x00B5,  # micro
+    0x00B2,  # superscript two
+    0x00B3,  # superscript three
+    0x00D7,  # multiplication sign
+    0x03BB,  # lambda
+    0x03C3,  # sigma
+    0x0394,  # Delta
+    0x221A,  # square root
+    0x2248,  # almost equal
+    0x2264,  # <=
+    0x2265,  # >=
+    0x25B2,  # up triangle
+    0x25BC,  # down triangle
+    0x25C0,  # left triangle
+    0x25B6,  # right triangle
+    0x25CF,  # filled circle
+    0x25A0,  # filled square
+    0x25CB,  # hollow circle
+    0x2500,  # box drawing light horizontal
+    0x2502,  # box drawing light vertical
+]
+CODEPOINTS = list(range(32, 127)) + EXTRA
+
+
+def render_face(path, size):
+    font = ImageFont.truetype(path, size)
+    ascent, descent = font.getmetrics()
+    glyphs = []
+    total_w = 0
+    max_h = 0
+    for cp in CODEPOINTS:
+        ch = chr(cp)
+        try:
+            mask = font.getmask(ch, mode="L")
+            bbox = font.getbbox(ch)
+        except Exception:
+            mask, bbox = None, None
+        adv = int(round(font.getlength(ch)))
+        if mask is None or mask.size[0] == 0 or mask.size[1] == 0 or bbox is None:
+            glyphs.append(dict(cp=cp, w=0, h=0, bx=0, by=0, adv=adv, bits=b""))
+            continue
+        w, h = mask.size
+        data = bytes(mask)
+        # bbox is (x0, y0, x1, y1) with y measured downward from the ascent line
+        bx = int(bbox[0])
+        by = int(bbox[1]) - ascent          # negative == above the baseline
+        glyphs.append(dict(cp=cp, w=w, h=h, bx=bx, by=by, adv=adv, bits=data))
+        total_w += w
+        max_h = max(max_h, h)
+    return dict(ascent=ascent, descent=descent, line=ascent + descent,
+                glyphs=glyphs, atlas_w=total_w, atlas_h=max_h)
+
+
+def emit(out, name, face, index):
+    # One atlas row: glyphs laid side by side, each padded down to atlas_h.
+    aw, ah = face["atlas_w"], face["atlas_h"]
+    atlas = bytearray(aw * ah)
+    x = 0
+    for g in face["glyphs"]:
+        g["ax"] = x
+        for row in range(g["h"]):
+            src = row * g["w"]
+            dst = row * aw + x
+            atlas[dst:dst + g["w"]] = g["bits"][src:src + g["w"]]
+        x += g["w"]
+
+    out.write(f"/* ---- {name}: {aw} x {ah} alpha atlas, {len(face['glyphs'])}"
+              f" glyphs, line height {face['line']} ---- */\n")
+    out.write(f"static const uint8_t ui_atlas{index}[{aw * ah}] = {{\n")
+    for i in range(0, len(atlas), 28):
+        chunk = ",".join(str(b) for b in atlas[i:i + 28])
+        out.write("    " + chunk + ",\n")
+    out.write("};\n\n")
+
+    out.write(f"static const UI_Glyph ui_glyphs{index}[{len(face['glyphs'])}] = {{\n")
+    for g in face["glyphs"]:
+        out.write("    {{ {:5d}, {:3d}, {:3d}, {:4d}, {:4d}, {:3d} }},\n".format(
+            g["ax"], g["w"], g["h"], g["bx"], g["by"], g["adv"]))
+    out.write("};\n\n")
+    return aw, ah
+
+
+def main():
+    dst = sys.argv[1] if len(sys.argv) > 1 else "ui_font_data.c"
+    faces = [render_face(p, s) for (_, p, s) in FACES]
+
+    with open(dst, "w") as out:
+        out.write("/* =========================================================="
+                  "================\n")
+        out.write(" *  PWRadarSystem - PWRadarUI\n")
+        out.write(" *  ------------------------------------------------------"
+                  "------------------\n")
+        out.write(" *  File    : ui_font_data.c   (GENERATED - do not edit)\n")
+        out.write(" *  Source  : tools/gen_font.py\n")
+        out.write(" *  Purpose : Antialiased 8-bit alpha glyph atlases for the\n")
+        out.write(" *            console's text renderer.  Checked in so that the\n")
+        out.write(" *            build has no font dependency of any kind.\n")
+        out.write(" *  Language: ISO C17\n")
+        out.write(" * ========================================================"
+                  "================== */\n")
+        out.write('#include "ui_font.h"\n\n')
+
+        dims = []
+        for i, (name, path, size) in enumerate(FACES):
+            dims.append(emit(out, name, faces[i], i))
+
+        out.write("static const int32_t ui_codepoints[UI_FONT_GLYPHS] = {\n")
+        for i in range(0, len(CODEPOINTS), 14):
+            out.write("    " + ",".join(str(c) for c in CODEPOINTS[i:i + 14]) + ",\n")
+        out.write("};\n\n")
+
+        out.write("const UI_Font ui_fonts[UI_FONT_COUNT] = {\n")
+        for i, (name, path, size) in enumerate(FACES):
+            f = faces[i]
+            out.write("    {{ ui_atlas{0}, ui_glyphs{0}, ui_codepoints, "
+                      "{1}, {2}, {3}, {4}, {5}, UI_FONT_GLYPHS }},\n".format(
+                          i, dims[i][0], dims[i][1], f["ascent"],
+                          f["descent"], f["line"]))
+        out.write("};\n")
+
+    total = sum(d[0] * d[1] for d in dims)
+    print(f"wrote {dst}: {len(FACES)} faces, {len(CODEPOINTS)} glyphs each, "
+          f"{total} atlas bytes")
+
+
+if __name__ == "__main__":
+    main()

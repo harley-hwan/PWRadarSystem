@@ -1,0 +1,80 @@
+# ==========================================================================
+#  PWRadarSystem - line-ending and diff policy
+#  ------------------------------------------------------------------------
+#  Why this file is not optional
+#  ----------------------------
+#  This repository is built on Windows (MSVC) and on Linux (GCC/Clang) from
+#  the same checkout.  Git for Windows installs with core.autocrlf=true by
+#  default, which rewrites line endings on checkout according to the *user's*
+#  configuration rather than the file's requirements.  That silently breaks
+#  the build in two directions:
+#
+#    * build.sh / tools/*.sh checked out as CRLF  ->  the shebang becomes
+#      "#!/bin/sh\r", and the loader reports "bad interpreter: No such file
+#      or directory".  Every later line also carries a stray \r, so even
+#      `set -e` misbehaves.  The failure message names the interpreter, not
+#      the line endings, so it reads like a missing shell.
+#
+#    * build.bat checked out as LF  ->  cmd.exe reads .bat files a line at a
+#      time from disk and its parser is CR-sensitive; multi-line constructs
+#      and goto/label resolution misbehave in ways that depend on the file
+#      offset, which makes it look intermittent.
+#
+#  Pinning eol per pattern here makes the working tree correct regardless of
+#  what any contributor has in their global git config.  The repository
+#  itself always stores LF.
+# ==========================================================================
+
+# Default: treat everything as text, normalise to LF in the repository, and
+# check out LF.  Explicit rules below override this where the platform needs
+# something else.
+*                   text=auto eol=lf
+
+# ---- must be CRLF in the working tree ------------------------------------
+*.bat               text eol=crlf
+*.cmd               text eol=crlf
+*.ps1               text eol=crlf
+*.sln               text eol=crlf
+*.vcxproj           text eol=crlf
+*.vcxproj.filters   text eol=crlf
+*.props             text eol=crlf
+
+# ---- must be LF in the working tree, on every platform -------------------
+*.sh                text eol=lf
+*.c                 text eol=lf
+*.h                 text eol=lf
+*.py                text eol=lf
+*.md                text eol=lf
+*.cmake             text eol=lf
+*.yml               text eol=lf
+*.yaml              text eol=lf
+CMakeLists.txt      text eol=lf
+Makefile            text eol=lf
+.gitignore          text eol=lf
+.gitattributes      text eol=lf
+
+# ---- never transformed ---------------------------------------------------
+*.png               binary
+*.jpg               binary
+*.ppm               binary
+*.pgm               binary
+*.zip               binary
+*.dll               binary
+*.exe               binary
+*.lib               binary
+*.pdb               binary
+*.bin               binary
+*.dat               binary
+
+# ==========================================================================
+#  GitHub presentation
+# ==========================================================================
+# The font atlas is a build-time artefact of tools/gen_font.py that is
+# committed on purpose (so the UI needs no font library at all).  Marking it
+# generated keeps a 57 KB table of glyph bitmaps out of the language
+# statistics and collapses it by default in pull-request diffs.
+PWRadarUI/src/ui_font_data.c    linguist-generated=true
+
+# .h in this project is always C, never C++.  Without this hint GitHub's
+# language detection splits the repository between C and C++.
+*.h                 linguist-language=C
