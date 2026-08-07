@@ -26,6 +26,7 @@
 
 #include "ui_colormap.h"
 #include "ui_gfx.h"
+#include "ui_history.h"
 #include "ui_widget.h"
 
 typedef struct UI_Ppi
@@ -42,6 +43,7 @@ typedef struct UI_Ppi
     double   heading_up_deg;    /* rotate the picture (0 => north up)         */
     int32_t  cmap;              /* UI_ColormapId for the video                */
     double   video_gain_db;     /* operator brightness control                */
+    double   leader_time_s;     /* velocity-vector length, seconds of travel  */
 
     /* ---- layers --------------------------------------------------------- */
     int32_t  show_video;
@@ -53,6 +55,21 @@ typedef struct UI_Ppi
     int32_t  show_truth;
     int32_t  show_labels;
     int32_t  show_gates;        /* draw the track covariance ellipse          */
+
+    /* ---- history overlays (data owned by the application) ---------------
+     *  The app accumulates long-term display history from the frames it has
+     *  already acquired and lends it to the scope through these pointers, so
+     *  the PPI can show full paths, scan-persistent plots, plot-to-track
+     *  association and the per-dwell hit/miss evidence. */
+    const UI_PathSet*     track_paths;
+    const UI_PathSet*     truth_paths;
+    const UI_PlotHistory* plot_hist;
+    double   hist_retain_s;     /* fade / prune window for the overlays       */
+    int32_t  show_track_paths;
+    int32_t  show_truth_paths;
+    int32_t  show_plot_hist;
+    int32_t  show_assoc;        /* plot-to-track association lines            */
+    int32_t  show_dwell;        /* per-dwell hit / miss rings on tracks       */
 
     /* ---- interaction ---------------------------------------------------- */
     int32_t  selected_track;    /* track id, 0 when nothing is selected       */

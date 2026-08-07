@@ -151,6 +151,11 @@ void ui_polyline(UI_Canvas* c, const float* xs, const float* ys, int32_t n,
 void ui_line_dash(UI_Canvas* c, double x0, double y0, double x1, double y1,
                   UI_Color col, double width, double on, double off);
 
+/** Antialiased arrow: a shaft plus a filled triangular head whose tip lies
+ *  exactly at (x1, y1).  head_len is clamped to the segment length. */
+void ui_arrow(UI_Canvas* c, double x0, double y0, double x1, double y1,
+              UI_Color col, double width, double head_len);
+
 /** Convex or concave polygon fill, even-odd rule, 4x vertically supersampled. */
 void ui_fill_poly(UI_Canvas* c, const float* xs, const float* ys, int32_t n,
                   UI_Color col);

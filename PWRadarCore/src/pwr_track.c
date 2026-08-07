@@ -371,10 +371,11 @@ static void pwr_trail_push(PWR_TrackInternal* tk, double time_s)
 /* ==========================================================================
  *  Track initiation
  * ========================================================================== */
-static void pwr_track_init_from_detection(PWR_Tracker* tr,
-                                          const PWR_Detection* det,
-                                          const PWR_TrackerConfig* cfg,
-                                          double time_s)
+/* Returns the new track id, or 0 when the track file is full. */
+static uint32_t pwr_track_init_from_detection(PWR_Tracker* tr,
+                                              const PWR_Detection* det,
+                                              const PWR_TrackerConfig* cfg,
+                                              double time_s)
 {
     uint32_t slot = PWR_MAX_TRACKS;
     uint32_t i;
@@ -386,7 +387,7 @@ static void pwr_track_init_from_detection(PWR_Tracker* tr,
     {
         if (tr->tracks[i].state == PWR_TRACK_FREE) { slot = i; break; }
     }
-    if (slot == PWR_MAX_TRACKS) { return; }
+    if (slot == PWR_MAX_TRACKS) { return 0u; }
 
     tk = &tr->tracks[slot];
     memset(tk, 0, sizeof(*tk));
@@ -410,6 +411,7 @@ static void pwr_track_init_from_detection(PWR_Tracker* tr,
     tk->hits                = 1u;
     tk->update_attempts     = 1u;
     tk->history_bits        = 1u;
+    tk->dwell_state         = PWR_DWELL_HIT;    /* born from this dwell's plot */
     tk->snr_db              = (float)det->snr_db;
     tk->first_time_s        = time_s;
     tk->last_meas_time_s    = time_s;
@@ -420,6 +422,7 @@ static void pwr_track_init_from_detection(PWR_Tracker* tr,
     tk->target_class        = PWR_CLASS_UNKNOWN;
     pwr_trail_push(tk, time_s);
     ++tr->created_total;
+    return tk->id;
 }
 
 /* ==========================================================================
@@ -459,6 +462,7 @@ void pwr_tracker_update(struct PWR_Engine* e)
         PWR_TrackInternal* tk = &tr->tracks[i];
         double dt;
         if (tk->state == PWR_TRACK_FREE) { continue; }
+        tk->dwell_state = PWR_DWELL_IDLE;
         dt = now - tk->last_predict_time_s;
         if (dt > 0.0)
         {
@@ -652,6 +656,11 @@ void pwr_tracker_update(struct PWR_Engine* e)
                 tk->innovation_norm = (float)((d2 > 0.0) ? sqrt(d2) : 0.0);
                 pwr_kf_update(tk, z, R2);
 
+                /* Label the consumed plot so the console can show which
+                 * detection updated which track this dwell. */
+                e->detections[j].assoc_track_id = (int32_t)tk->id;
+                tk->dwell_state = PWR_DWELL_HIT;
+
                 tk->history_bits      |= 1u;
                 ++tk->hits;
                 tk->consecutive_misses = 0u;
@@ -668,6 +677,7 @@ void pwr_tracker_update(struct PWR_Engine* e)
             }
             else
             {
+                tk->dwell_state = PWR_DWELL_MISS;
                 ++tk->misses;
                 ++tk->consecutive_misses;
                 tk->score -= 1.5;
@@ -741,7 +751,12 @@ void pwr_tracker_update(struct PWR_Engine* e)
                 }
                 if (blocked == 0)
                 {
-                    pwr_track_init_from_detection(tr, det, cfg, now);
+                    const uint32_t nid =
+                        pwr_track_init_from_detection(tr, det, cfg, now);
+                    if (nid != 0u)
+                    {
+                        e->detections[c].assoc_track_id = (int32_t)nid;
+                    }
                 }
             }
         }

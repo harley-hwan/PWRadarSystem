@@ -115,6 +115,7 @@ typedef struct PWR_TrackInternal
     uint32_t history_bits;        /* sliding M-of-N hit history               */
     int32_t  state;               /* PWR_TrackState                           */
     int32_t  target_class;
+    int32_t  dwell_state;         /* PWR_DWELL_*, refreshed every CPI         */
     float    snr_db;
     float    innovation_norm;
     double   first_time_s;

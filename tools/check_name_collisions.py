@@ -122,6 +122,17 @@ PP_WORDS = frozenset(
     """.split()
 )
 
+# Compiler vocabulary the public headers *reference* but never *declare*:
+# platform test macros and calling-convention keywords.  These are supposed to
+# be macros (newer SDKs define _WIN32 in minwindef.h and __cdecl in ntdef.h as
+# object-like macros), so shadowing is their normal operation, not a hazard.
+COMPILER_PREDEFINED = frozenset(
+    """
+    _WIN32 _WIN64 _MSC_VER __cdecl __stdcall __fastcall __vectorcall
+    __declspec __attribute__ __GNUC__ __clang__ __cplusplus
+    """.split()
+)
+
 
 def splice_continuations(text: str) -> str:
     """Translation phase 2: join backslash-newline pairs."""
@@ -156,7 +167,8 @@ def collect_public_identifiers() -> tuple[dict[str, set[str]], set[str]]:
             clean = strip_noise(raw)
             rel = header.relative_to(REPO_ROOT).as_posix()
             for name in RE_IDENTIFIER.findall(clean):
-                if name in C_KEYWORDS or name in PP_WORDS:
+                if (name in C_KEYWORDS or name in PP_WORDS
+                        or name in COMPILER_PREDEFINED):
                     continue
                 declared.setdefault(name, set()).add(rel)
 

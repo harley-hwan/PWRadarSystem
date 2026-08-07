@@ -467,6 +467,8 @@ void pwr_frame_publish(struct PWR_Engine* e)
             dst->update_attempts   = tk->update_attempts;
             dst->state             = tk->state;
             dst->target_class      = tk->target_class;
+            dst->history_bits      = tk->history_bits;
+            dst->dwell_state       = tk->dwell_state;
             dst->trail_count       = tk->trail_count;
             dst->trail_head        = tk->trail_head;
             memcpy(dst->trail, tk->trail, sizeof(dst->trail));

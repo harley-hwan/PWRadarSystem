@@ -389,6 +389,11 @@ typedef struct PWR_Detection
     uint32_t doppler_bin;
     uint32_t cell_count;
     int32_t  ambiguous;             /* 1 => beyond unambiguous range/velocity */
+    /* Track that consumed this plot during data association in the same CPI,
+     * 0 when the plot went unassociated.  Lets the console draw plot-to-track
+     * association and label the plot table. */
+    int32_t  assoc_track_id;
+    int32_t  _pad0;
 } PWR_Detection;
 
 typedef struct PWR_TrackPoint
@@ -396,6 +401,12 @@ typedef struct PWR_TrackPoint
     float    x_m;
     float    y_m;
 } PWR_TrackPoint;
+
+/* Beam feedback for the current CPI, published per track so the console can
+ * show the dwell-level hit/miss evidence the M-of-N logic accumulates. */
+#define PWR_DWELL_IDLE  0           /* beam not on the predicted position     */
+#define PWR_DWELL_MISS  1           /* illuminated, no plot associated        */
+#define PWR_DWELL_HIT   2           /* illuminated and updated by a plot      */
 
 typedef struct PWR_Track
 {
@@ -413,6 +424,11 @@ typedef struct PWR_Track
     uint32_t hits, misses, consecutive_misses, update_attempts;
     int32_t  state;                 /* PWR_TrackState                          */
     int32_t  target_class;          /* PWR_TargetClass                         */
+    /* Sliding dwell window, newest attempt in bit 0, 1 == hit.  The confirm
+     * logic counts these bits over the last confirm_n attempts, so this is
+     * the exact M-of-N evidence behind the track state. */
+    uint32_t history_bits;
+    int32_t  dwell_state;           /* PWR_DWELL_*, this CPI's beam feedback   */
     uint32_t trail_count;
     uint32_t trail_head;
     PWR_TrackPoint trail[PWR_TRACK_TRAIL_LEN];

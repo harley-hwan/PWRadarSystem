@@ -11,6 +11,7 @@
 
 #include "pwradar/pwr_api.h"
 
+#include "ui_history.h"
 #include "ui_plot.h"
 #include "ui_ppi.h"
 #include "ui_widget.h"
@@ -33,10 +34,36 @@ typedef enum App_RightTab
 {
     APP_RT_TRACKS = 0,
     APP_RT_PLOTS,
+    APP_RT_VERIFY,
     APP_RT_TARGETS,
     APP_RT_LOG,
     APP_RT_COUNT
 } App_RightTab;
+
+/* --------------------------------------------------------------------------
+ *  Truth-versus-track scoring (the Verify tab)
+ *  -------------------------------------------
+ *  One accumulator per simulated target, paired to the nearest published
+ *  track each frame.  The derived figures are the standard single-picture
+ *  assessment set: track completeness (time tracked over time active),
+ *  positional RMSE against truth, and time-to-first-track, plus the global
+ *  spurious / redundant track counts.
+ * ------------------------------------------------------------------------ */
+typedef struct App_TruthScore
+{
+    double  first_seen_s;       /* first frame the target was active, -1     */
+    double  first_track_s;      /* first frame a track paired to it, -1      */
+    double  time_active_s;      /* integrated while active                   */
+    double  time_tracked_s;     /* integrated while paired                   */
+    double  err_now_m;          /* current pairing error, -1 when unpaired   */
+    double  err_sum2;           /* sum of squared pairing errors             */
+    uint32_t err_n;
+    int32_t truth_id;           /* 0 == free slot                            */
+    int32_t paired_track;       /* current track id, 0 == none               */
+    int32_t active;
+    int32_t _pad0;
+    char    label[PWR_LABEL_LEN];
+} App_TruthScore;
 
 typedef enum App_LowerRight
 {
@@ -91,6 +118,22 @@ typedef struct App
     /* ---- unrolled RTI ring ---------------------------------------------- */
     float*              rti_view;
     uint32_t            rti_rows, rti_cols;
+
+    /* ---- presentation history and verification --------------------------
+     *  Fed once per newly published frame, cleared on reset / scenario
+     *  change / scenario-time regression. */
+    UI_PathSet          track_paths;
+    UI_PathSet          truth_paths;
+    UI_PlotHistory      plot_hist;
+    double              hist_retain_s;
+    uint64_t            hist_last_seq;
+    double              ver_last_time_s;
+    App_TruthScore      scores[PWR_MAX_SIM_TARGETS];
+    int32_t             ver_rows[PWR_MAX_SIM_TARGETS];  /* row -> score slot  */
+    int32_t             ver_row_count;
+    int32_t             ver_truth_active, ver_truth_tracked;
+    int32_t             ver_spurious, ver_redundant;
+    UI_TableState       tbl_verify;
 
     /* ---- panels --------------------------------------------------------- */
     int32_t             tab_ctrl;

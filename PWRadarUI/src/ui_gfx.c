@@ -380,6 +380,31 @@ void ui_line_dash(UI_Canvas* c, double x0, double y0, double x1, double y1,
     }
 }
 
+void ui_arrow(UI_Canvas* c, double x0, double y0, double x1, double y1,
+              UI_Color col, double width, double head_len)
+{
+    const double dx = x1 - x0, dy = y1 - y0;
+    const double len = sqrt(dx * dx + dy * dy);
+    double ux, uy, bx, by, hw;
+    float px[3], py[3];
+
+    if (len < 1e-6) { return; }
+    ux = dx / len;
+    uy = dy / len;
+    if (head_len > len) { head_len = len; }
+    if (head_len < 3.0) { head_len = 3.0; }
+    bx = x1 - ux * head_len;             /* centre of the head's base */
+    by = y1 - uy * head_len;
+    hw = head_len * 0.42;                /* head half-width           */
+
+    /* The shaft runs one pixel into the head so no gap opens at the joint. */
+    ui_line(c, x0, y0, bx + ux, by + uy, col, width);
+    px[0] = (float)x1;             py[0] = (float)y1;
+    px[1] = (float)(bx - uy * hw); py[1] = (float)(by + ux * hw);
+    px[2] = (float)(bx + uy * hw); py[2] = (float)(by - ux * hw);
+    ui_fill_poly(c, px, py, 3, col);
+}
+
 /* ==========================================================================
  *  Polygon fill
  * ==========================================================================

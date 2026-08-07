@@ -108,6 +108,210 @@ static uint32_t app_scenario_count(void)
 }
 
 /* ==========================================================================
+ *  Display history and truth-versus-track scoring
+ * ========================================================================== */
+static void app_history_clear(App* a)
+{
+    uint32_t i;
+    ui_pathset_clear(&a->track_paths);
+    ui_pathset_clear(&a->truth_paths);
+    ui_plot_history_clear(&a->plot_hist);
+    memset(a->scores, 0, sizeof(a->scores));
+    for (i = 0u; i < PWR_MAX_SIM_TARGETS; ++i)
+    {
+        a->scores[i].first_seen_s  = -1.0;
+        a->scores[i].first_track_s = -1.0;
+        a->scores[i].err_now_m     = -1.0;
+    }
+    a->ver_last_time_s   = 0.0;
+    a->ver_row_count     = 0;
+    a->ver_truth_active  = 0;
+    a->ver_truth_tracked = 0;
+    a->ver_spurious      = 0;
+    a->ver_redundant     = 0;
+}
+
+static App_TruthScore* app_score_slot(App* a, int32_t truth_id)
+{
+    App_TruthScore* dead = NULL;
+    uint32_t i;
+    for (i = 0u; i < PWR_MAX_SIM_TARGETS; ++i)
+    {
+        if (a->scores[i].truth_id == truth_id) { return &a->scores[i]; }
+        if (a->scores[i].truth_id == 0 && dead == NULL)
+        {
+            dead = &a->scores[i];
+        }
+    }
+    if (dead == NULL)
+    {
+        for (i = 0u; i < PWR_MAX_SIM_TARGETS; ++i)
+        {
+            if (a->scores[i].active == 0) { dead = &a->scores[i]; break; }
+        }
+    }
+    if (dead != NULL)
+    {
+        memset(dead, 0, sizeof(*dead));
+        dead->truth_id      = truth_id;
+        dead->first_seen_s  = -1.0;
+        dead->first_track_s = -1.0;
+        dead->err_now_m     = -1.0;
+    }
+    return dead;
+}
+
+/* Greedy truth-to-track pairing plus the per-target bookkeeping behind the
+ * Verify tab: completeness, RMSE, time-to-first-track, spurious/redundant. */
+static void app_verify_update(App* a, double now, double dt)
+{
+    const PWR_Frame* f = &a->frame;
+    const double gate_m = 1500.0;       /* pairing radius, generous 3-sigma */
+    uint8_t used[PWR_MAX_TRACKS];
+    uint32_t i, k;
+
+    memset(used, 0, sizeof(used));
+    a->ver_truth_active  = 0;
+    a->ver_truth_tracked = 0;
+    a->ver_redundant     = 0;
+
+    /* Reclaim slots whose target no longer exists in the scenario (target
+     * list cleared or scenario reloaded): the published truth list always
+     * carries every current target, enabled or not. */
+    for (i = 0u; i < PWR_MAX_SIM_TARGETS; ++i)
+    {
+        int present = 0;
+        if (a->scores[i].truth_id == 0) { continue; }
+        for (k = 0u; k < f->truth_count; ++k)
+        {
+            if (f->truth[k].id == a->scores[i].truth_id) { present = 1; break; }
+        }
+        if (present == 0) { a->scores[i].truth_id = 0; }
+    }
+
+    for (i = 0u; i < f->truth_count; ++i)
+    {
+        const PWR_SimTarget* tg = &f->truth[i];
+        App_TruthScore* sc = app_score_slot(a, tg->id);
+        if (sc == NULL) { continue; }
+        (void)snprintf(sc->label, sizeof(sc->label), "%s", tg->label);
+        sc->active = tg->enabled;
+        if (tg->enabled == 0)
+        {
+            sc->paired_track = 0;
+            sc->err_now_m    = -1.0;
+            continue;
+        }
+        ++a->ver_truth_active;
+        if (sc->first_seen_s < 0.0) { sc->first_seen_s = now; }
+        sc->time_active_s += dt;
+
+        {
+            double best = gate_m;
+            int32_t bi = -1;
+            for (k = 0u; k < f->track_count; ++k)
+            {
+                double dx, dy, d;
+                if (used[k] != 0u) { continue; }
+                dx = f->tracks[k].x_m - tg->x_m;
+                dy = f->tracks[k].y_m - tg->y_m;
+                d  = sqrt(dx * dx + dy * dy);
+                if (d < best) { best = d; bi = (int32_t)k; }
+            }
+            if (bi >= 0)
+            {
+                used[bi] = 1u;
+                sc->paired_track    = (int32_t)f->tracks[bi].id;
+                sc->err_now_m       = best;
+                sc->err_sum2       += best * best;
+                ++sc->err_n;
+                sc->time_tracked_s += dt;
+                if (sc->first_track_s < 0.0) { sc->first_track_s = now; }
+                ++a->ver_truth_tracked;
+                /* Additional confirmed tracks inside the same gate hold the
+                 * same target twice: redundancy, the classic split-track
+                 * failure the init-inhibit radius is meant to prevent. */
+                for (k = 0u; k < f->track_count; ++k)
+                {
+                    double dx, dy;
+                    if (used[k] != 0u) { continue; }
+                    if (f->tracks[k].state != PWR_TRACK_CONFIRMED) { continue; }
+                    dx = f->tracks[k].x_m - tg->x_m;
+                    dy = f->tracks[k].y_m - tg->y_m;
+                    if (sqrt(dx * dx + dy * dy) < gate_m)
+                    {
+                        used[k] = 1u;
+                        ++a->ver_redundant;
+                    }
+                }
+            }
+            else
+            {
+                sc->paired_track = 0;
+                sc->err_now_m    = -1.0;
+            }
+        }
+    }
+
+    /* Confirmed tracks that no truth claims are spurious (false tracks). */
+    a->ver_spurious = 0;
+    for (k = 0u; k < f->track_count; ++k)
+    {
+        if (used[k] == 0u && f->tracks[k].state == PWR_TRACK_CONFIRMED)
+        {
+            ++a->ver_spurious;
+        }
+    }
+}
+
+/* Feeds one newly published frame into the display history. */
+static void app_history_feed(App* a)
+{
+    const PWR_Frame* f = &a->frame;
+    const double now = f->time_s;
+    const double min_step = 25.0;       /* path decimation, metres */
+    double dt;
+    uint32_t i;
+
+    /* Scenario time moved backwards: the engine was reset under us. */
+    if (now + 1e-6 < a->ver_last_time_s) { app_history_clear(a); }
+    dt = (a->ver_last_time_s > 0.0) ? (now - a->ver_last_time_s) : 0.0;
+    if (dt < 0.0 || dt > 10.0) { dt = 0.0; }
+
+    ui_pathset_begin_frame(&a->track_paths);
+    ui_pathset_begin_frame(&a->truth_paths);
+    for (i = 0u; i < f->track_count; ++i)
+    {
+        const PWR_Track* t = &f->tracks[i];
+        ui_pathset_point(&a->track_paths, (int32_t)t->id, t->target_class,
+                         t->state, (float)t->x_m, (float)t->y_m, now, min_step);
+    }
+    for (i = 0u; i < f->truth_count; ++i)
+    {
+        const PWR_SimTarget* t = &f->truth[i];
+        if (t->enabled == 0) { continue; }
+        ui_pathset_point(&a->truth_paths, t->id, t->target_class, 0,
+                         (float)t->x_m, (float)t->y_m, now, min_step);
+    }
+    ui_pathset_prune(&a->track_paths, now, a->hist_retain_s);
+    ui_pathset_prune(&a->truth_paths, now, a->hist_retain_s);
+
+    for (i = 0u; i < f->detection_count; ++i)
+    {
+        const PWR_Detection* d = &f->detections[i];
+        const double az = d->azimuth_deg * UI_PI / 180.0;
+        ui_plot_history_push(&a->plot_hist,
+                             (float)(d->range_m * sin(az)),
+                             (float)(d->range_m * cos(az)),
+                             now, (float)d->snr_db, d->assoc_track_id);
+    }
+    ui_plot_history_prune(&a->plot_hist, now, a->hist_retain_s);
+
+    app_verify_update(a, now, dt);
+    a->ver_last_time_s = now;
+}
+
+/* ==========================================================================
  *  Life cycle
  * ========================================================================== */
 int app_create(App* a, char* err, size_t err_cap)
@@ -173,6 +377,16 @@ int app_create(App* a, char* err, size_t err_cap)
     a->ppi.range_max_full_m = a->ppi.range_max_m;
     a->ppi.video_gain_db    = 5.0;
 
+    /* ---- display history and verification ------------------------------- */
+    ui_pathset_init(&a->track_paths);
+    ui_pathset_init(&a->truth_paths);
+    ui_plot_history_init(&a->plot_hist);
+    a->hist_retain_s   = 300.0;
+    a->ppi.track_paths = &a->track_paths;
+    a->ppi.truth_paths = &a->truth_paths;
+    a->ppi.plot_hist   = &a->plot_hist;
+    app_history_clear(a);
+
     ui_axes_init(&a->ax_scope, "A-scope   range profile",
                  "range [km]", "SNR [dB]");
     ui_axes_set_full(&a->ax_scope, 0.0, a->ppi.range_max_m * 1e-3, -10.0, 90.0);
@@ -220,6 +434,8 @@ int app_create(App* a, char* err, size_t err_cap)
     a->tbl_plots.selected = -1;
     a->tbl_targets.row_h = 20;
     a->tbl_targets.selected = -1;
+    a->tbl_verify.row_h  = 20;
+    a->tbl_verify.selected = -1;
     a->cursor_bin_ui = (int32_t)(a->dm.range_bins / 2u);
 
     return 1;
@@ -230,6 +446,9 @@ void app_destroy(App* a)
     if (a->have_frame != 0) { (void)pwr_engine_frame_release(a->eng); }
     if (a->eng != NULL) { pwr_engine_destroy(a->eng); a->eng = NULL; }
     ui_ppi_release(&a->ppi);
+    ui_pathset_release(&a->track_paths);
+    ui_pathset_release(&a->truth_paths);
+    ui_plot_history_release(&a->plot_hist);
     free(a->rti_view);
     a->rti_view = NULL;
     if (a->plat != NULL) { ui_plat_destroy(a->plat); a->plat = NULL; }
@@ -284,6 +503,7 @@ static void app_draw_toolbar(App* a, UI_Rect r)
     if (ui_button(c, ui_id("tb.reset", 0), ui_rect(x, by, 60, 26), "RESET") != 0)
     {
         (void)pwr_engine_reset(a->eng);
+        app_history_clear(a);
     }
     x += 74;
 
@@ -296,6 +516,7 @@ static void app_draw_toolbar(App* a, UI_Rect r)
         {
             (void)pwr_engine_load_scenario(a->eng, (uint32_t)a->scenario);
             (void)pwr_engine_get_environment(a->eng, &a->env);
+            app_history_clear(a);
         }
         x += w + 12;
     }
@@ -987,6 +1208,10 @@ static void app_panel_display(App* a, UI_Rect r)
                   &v, 0.5, app_max(a->ppi.range_max_full_m * 1e-3, 1.0),
                   "%.1f", 0) != 0)
     { a->ppi.range_max_m = v * 1e3; }
+    v = a->ppi.leader_time_s;
+    if (ui_slider(c, ui_id("dp.pl", 0), ui_stack_row(&s, 24), "leader [s]",
+                  &v, 15.0, 240.0, "%.0f", 1) != 0)
+    { a->ppi.leader_time_s = v; }
 
     (void)ui_checkbox(c, ui_id("dp.v", 0), ui_stack_row(&s, 21),
                       "radar video", &a->ppi.show_video);
@@ -1006,6 +1231,26 @@ static void app_panel_display(App* a, UI_Rect r)
                       "ground truth overlay", &a->ppi.show_truth);
     (void)ui_checkbox(c, ui_id("dp.lb", 0), ui_stack_row(&s, 21),
                       "labels", &a->ppi.show_labels);
+
+    ui_separator(c, ui_stack_row(&s, 10));
+    ui_label_dim(c, ui_stack_row(&s, 16), "HISTORY / VERIFICATION");
+    (void)ui_checkbox(c, ui_id("dp.hp", 0), ui_stack_row(&s, 21),
+                      "full track paths", &a->ppi.show_track_paths);
+    (void)ui_checkbox(c, ui_id("dp.ht", 0), ui_stack_row(&s, 21),
+                      "truth paths", &a->ppi.show_truth_paths);
+    (void)ui_checkbox(c, ui_id("dp.hh", 0), ui_stack_row(&s, 21),
+                      "plot history", &a->ppi.show_plot_hist);
+    (void)ui_checkbox(c, ui_id("dp.ha", 0), ui_stack_row(&s, 21),
+                      "plot-track association", &a->ppi.show_assoc);
+    (void)ui_checkbox(c, ui_id("dp.hd", 0), ui_stack_row(&s, 21),
+                      "dwell hit/miss rings", &a->ppi.show_dwell);
+    v = a->hist_retain_s;
+    if (ui_slider(c, ui_id("dp.hr", 0), ui_stack_row(&s, 24), "history [s]",
+                  &v, 10.0, 3600.0, "%.0f", 1) != 0)
+    { a->hist_retain_s = v; }
+    if (ui_button(c, ui_id("dp.hx", 0), ui_stack_row(&s, 24),
+                  "CLEAR HISTORY") != 0)
+    { app_history_clear(a); }
 
     ui_separator(c, ui_stack_row(&s, 10));
     ui_label_dim(c, ui_stack_row(&s, 16), "RANGE-DOPPLER MAP");
@@ -1078,7 +1323,20 @@ static void app_cell_track(void* user, int32_t row, int32_t col,
     case 4: (void)snprintf(out, cap, "%.0f", t->speed_mps); break;
     case 5: (void)snprintf(out, cap, "%03.0f", t->course_deg); break;
     case 6: (void)snprintf(out, cap, "%.1f", (double)t->snr_db); break;
-    case 7: (void)snprintf(out, cap, "%s",
+    case 7:
+    {
+        /* Last eight dwell attempts, oldest left, '#' == hit: the raw
+         * M-of-N evidence behind the STATE column. */
+        int32_t b;
+        if (cap < 9u) { break; }
+        for (b = 0; b < 8; ++b)
+        {
+            out[b] = (((t->history_bits >> (7 - b)) & 1u) != 0u) ? '#' : '.';
+        }
+        out[8] = '\0';
+        break;
+    }
+    case 8: (void)snprintf(out, cap, "%s",
                            pwr_class_name((PWR_TargetClass)t->target_class)); break;
     default: break;
     }
@@ -1104,6 +1362,84 @@ static void app_cell_plot(void* user, int32_t row, int32_t col,
     case 4: (void)snprintf(out, cap, "%.1f", (double)d->snr_db); break;
     case 5: (void)snprintf(out, cap, "%.1f", (double)d->threshold_db); break;
     case 6: (void)snprintf(out, cap, "%u", d->cell_count); break;
+    case 7:
+        if (d->assoc_track_id > 0)
+        {
+            (void)snprintf(out, cap, "T%03d", d->assoc_track_id);
+        }
+        else
+        {
+            (void)snprintf(out, cap, "-");
+            *fg = UI_C_TEXT_DIM;
+        }
+        break;
+    default: break;
+    }
+}
+
+/* ---- Verify tab: one row per truth target ------------------------------- */
+static void app_cell_verify(void* user, int32_t row, int32_t col,
+                            char* out, size_t cap, UI_Color* fg)
+{
+    App* a = (App*)user;
+    const App_TruthScore* sc;
+    const char* st;
+    UI_Color sc_col;
+
+    if (row < 0 || row >= a->ver_row_count) { return; }
+    sc = &a->scores[a->ver_rows[row]];
+
+    if (sc->active == 0)                  { st = "OUT";    sc_col = UI_C_TEXT_FAINT; }
+    else if (sc->paired_track != 0)       { st = "TRACK";  sc_col = UI_C_TRACK_CONF; }
+    else if (sc->first_track_s >= 0.0)    { st = "LOST";   sc_col = UI_C_ALARM; }
+    else                                  { st = "SEARCH"; sc_col = UI_C_WARN; }
+    *fg = sc_col;
+
+    switch (col)
+    {
+    case 0:
+        (void)snprintf(out, cap, "%s", sc->label);
+        *fg = UI_C_TRUTH;
+        break;
+    case 1:
+        if (sc->paired_track != 0)
+        {
+            (void)snprintf(out, cap, "T%03d", sc->paired_track);
+        }
+        else { (void)snprintf(out, cap, "-"); }
+        break;
+    case 2: (void)snprintf(out, cap, "%s", st); break;
+    case 3:
+        if (sc->err_now_m >= 0.0)
+        {
+            (void)snprintf(out, cap, "%.0f", sc->err_now_m);
+        }
+        else { (void)snprintf(out, cap, "-"); }
+        break;
+    case 4:
+        if (sc->err_n > 0u)
+        {
+            (void)snprintf(out, cap, "%.0f",
+                           sqrt(sc->err_sum2 / (double)sc->err_n));
+        }
+        else { (void)snprintf(out, cap, "-"); }
+        break;
+    case 5:
+        if (sc->time_active_s > 0.0)
+        {
+            (void)snprintf(out, cap, "%.0f",
+                           100.0 * sc->time_tracked_s / sc->time_active_s);
+        }
+        else { (void)snprintf(out, cap, "-"); }
+        break;
+    case 6:
+        if (sc->first_track_s >= 0.0 && sc->first_seen_s >= 0.0)
+        {
+            (void)snprintf(out, cap, "%.1f",
+                           sc->first_track_s - sc->first_seen_s);
+        }
+        else { (void)snprintf(out, cap, "-"); }
+        break;
     default: break;
     }
 }
@@ -1138,7 +1474,7 @@ static void app_draw_right(App* a, UI_Rect r)
 {
     UI_Context* c = &a->ui;
     static const char* const tabs[APP_RT_COUNT] = {
-        "Tracks", "Plots", "Targets", "Log"
+        "Tracks", "Plots", "Verify", "Targets", "Log"
     };
     const int32_t tab_h = 24;
     UI_Rect body;
@@ -1152,18 +1488,19 @@ static void app_draw_right(App* a, UI_Rect r)
     {
     case APP_RT_TRACKS:
     {
-        static const UI_TableColumn cols[8] = {
+        static const UI_TableColumn cols[9] = {
             { "ID",     44, UI_ALIGN_LEFT,   UI_FONT_MONO },
-            { "STATE",  66, UI_ALIGN_LEFT,   UI_FONT_SMALL },
-            { "R km",   50, UI_ALIGN_RIGHT,  UI_FONT_MONO },
+            { "STATE",  54, UI_ALIGN_LEFT,   UI_FONT_SMALL },
+            { "R km",   48, UI_ALIGN_RIGHT,  UI_FONT_MONO },
             { "AZ",     46, UI_ALIGN_RIGHT,  UI_FONT_MONO },
             { "V m/s",  44, UI_ALIGN_RIGHT,  UI_FONT_MONO },
             { "CRS",    38, UI_ALIGN_RIGHT,  UI_FONT_MONO },
-            { "SNR",    42, UI_ALIGN_RIGHT,  UI_FONT_MONO },
+            { "SNR",    40, UI_ALIGN_RIGHT,  UI_FONT_MONO },
+            { "HIT",    64, UI_ALIGN_LEFT,   UI_FONT_MONO },
             { "CLASS",   0, UI_ALIGN_LEFT,   UI_FONT_SMALL }
         };
         const int32_t n = (a->have_frame != 0) ? (int32_t)a->frame.track_count : 0;
-        if (ui_table(c, ui_id("rt.trk", 0), body, cols, 8, n,
+        if (ui_table(c, ui_id("rt.trk", 0), body, cols, 9, n,
                      &a->tbl_tracks, app_cell_track, a) != 0)
         {
             if (a->tbl_tracks.selected >= 0 && a->tbl_tracks.selected < n)
@@ -1190,19 +1527,87 @@ static void app_draw_right(App* a, UI_Rect r)
 
     case APP_RT_PLOTS:
     {
-        static const UI_TableColumn cols[7] = {
-            { "#",      36, UI_ALIGN_RIGHT, UI_FONT_MONO },
-            { "R km",   68, UI_ALIGN_RIGHT, UI_FONT_MONO },
-            { "AZ",     56, UI_ALIGN_RIGHT, UI_FONT_MONO },
-            { "Vr m/s", 60, UI_ALIGN_RIGHT, UI_FONT_MONO },
-            { "SNR dB", 58, UI_ALIGN_RIGHT, UI_FONT_MONO },
-            { "THR dB", 58, UI_ALIGN_RIGHT, UI_FONT_MONO },
-            { "CELLS",   0, UI_ALIGN_RIGHT, UI_FONT_MONO }
+        static const UI_TableColumn cols[8] = {
+            { "#",      32, UI_ALIGN_RIGHT, UI_FONT_MONO },
+            { "R km",   62, UI_ALIGN_RIGHT, UI_FONT_MONO },
+            { "AZ",     52, UI_ALIGN_RIGHT, UI_FONT_MONO },
+            { "Vr m/s", 56, UI_ALIGN_RIGHT, UI_FONT_MONO },
+            { "SNR dB", 54, UI_ALIGN_RIGHT, UI_FONT_MONO },
+            { "THR dB", 54, UI_ALIGN_RIGHT, UI_FONT_MONO },
+            { "CELLS",  44, UI_ALIGN_RIGHT, UI_FONT_MONO },
+            { "TRK",     0, UI_ALIGN_LEFT,  UI_FONT_MONO }
         };
         const int32_t n = (a->have_frame != 0)
             ? (int32_t)a->frame.detection_count : 0;
-        (void)ui_table(c, ui_id("rt.plt", 0), body, cols, 7, n,
+        (void)ui_table(c, ui_id("rt.plt", 0), body, cols, 8, n,
                        &a->tbl_plots, app_cell_plot, a);
+        break;
+    }
+
+    case APP_RT_VERIFY:
+    {
+        static const UI_TableColumn cols[7] = {
+            { "TARGET", 78, UI_ALIGN_LEFT,  UI_FONT_SMALL },
+            { "TRK",    42, UI_ALIGN_LEFT,  UI_FONT_MONO },
+            { "ST",     52, UI_ALIGN_LEFT,  UI_FONT_SMALL },
+            { "ERR",    46, UI_ALIGN_RIGHT, UI_FONT_MONO },
+            { "RMSE",   48, UI_ALIGN_RIGHT, UI_FONT_MONO },
+            { "CMP%",   46, UI_ALIGN_RIGHT, UI_FONT_MONO },
+            { "TTT",     0, UI_ALIGN_RIGHT, UI_FONT_MONO }
+        };
+        const int32_t foot_h = 4 * 17 + 8;
+        const UI_Rect tbl = ui_rect(body.x, body.y, body.w,
+                                    (body.h - foot_h > 60) ? (body.h - foot_h)
+                                                           : 60);
+        int32_t i;
+        char buf[64];
+
+        a->ver_row_count = 0;
+        for (i = 0; i < (int32_t)PWR_MAX_SIM_TARGETS; ++i)
+        {
+            if (a->scores[i].truth_id != 0 && a->scores[i].first_seen_s >= 0.0)
+            {
+                a->ver_rows[a->ver_row_count++] = i;
+            }
+        }
+        (void)ui_table(c, ui_id("rt.ver", 0), tbl, cols, 7, a->ver_row_count,
+                       &a->tbl_verify, app_cell_verify, a);
+
+        /* ---- single-picture summary ------------------------------------- */
+        {
+            UI_Stack st;
+            ui_stack_begin(&st, ui_rect(body.x + 6, tbl.y + tbl.h + 4,
+                                        body.w - 12, foot_h - 4), 0);
+            (void)snprintf(buf, sizeof(buf), "%d / %d",
+                           a->ver_truth_tracked, a->ver_truth_active);
+            ui_readout(c, ui_stack_row(&st, 17), "truth under track", buf,
+                       (a->ver_truth_active > 0 &&
+                        a->ver_truth_tracked == a->ver_truth_active)
+                           ? UI_C_OK : UI_C_WARN);
+            (void)snprintf(buf, sizeof(buf), "%d", a->ver_spurious);
+            ui_readout(c, ui_stack_row(&st, 17), "spurious confirmed", buf,
+                       (a->ver_spurious > 0) ? UI_C_ALARM : UI_C_TEXT_DIM);
+            (void)snprintf(buf, sizeof(buf), "%d", a->ver_redundant);
+            ui_readout(c, ui_stack_row(&st, 17), "redundant tracks", buf,
+                       (a->ver_redundant > 0) ? UI_C_WARN : UI_C_TEXT_DIM);
+            {
+                double comp = 0.0, act = 0.0;
+                for (i = 0; i < a->ver_row_count; ++i)
+                {
+                    const App_TruthScore* sc = &a->scores[a->ver_rows[i]];
+                    comp += sc->time_tracked_s;
+                    act  += sc->time_active_s;
+                }
+                if (act > 0.0)
+                {
+                    (void)snprintf(buf, sizeof(buf), "%.1f %%",
+                                   100.0 * comp / act);
+                }
+                else { (void)snprintf(buf, sizeof(buf), "-"); }
+                ui_readout(c, ui_stack_row(&st, 17), "track completeness",
+                           buf, UI_C_TEXT);
+            }
+        }
         break;
     }
 
@@ -1295,6 +1700,27 @@ static void app_draw_readouts(App* a, UI_Rect r)
         ui_readout(c, ui_stack_row(&s, 17), "SNR", buf, UI_C_TEXT);
         (void)snprintf(buf, sizeof(buf), "%u / %u", sel->hits, sel->update_attempts);
         ui_readout(c, ui_stack_row(&s, 17), "hits / attempts", buf, UI_C_TEXT);
+        {
+            /* Last 16 dwell attempts, oldest left - the M-of-N evidence. */
+            char pat[17];
+            int32_t b;
+            for (b = 0; b < 16; ++b)
+            {
+                pat[b] = (((sel->history_bits >> (15 - b)) & 1u) != 0u)
+                       ? '#' : '.';
+            }
+            pat[16] = '\0';
+            (void)snprintf(buf, sizeof(buf), "%s  (%d of %d)", pat,
+                           a->cfg.tracker.confirm_m, a->cfg.tracker.confirm_n);
+            ui_readout(c, ui_stack_row(&s, 17), "dwell window", buf, UI_C_TEXT);
+        }
+        ui_readout(c, ui_stack_row(&s, 17), "this dwell",
+                   (sel->dwell_state == PWR_DWELL_HIT) ? "HIT"
+                       : ((sel->dwell_state == PWR_DWELL_MISS) ? "MISS"
+                                                               : "not in beam"),
+                   (sel->dwell_state == PWR_DWELL_HIT) ? UI_C_OK
+                       : ((sel->dwell_state == PWR_DWELL_MISS) ? UI_C_ALARM
+                                                               : UI_C_TEXT_DIM));
         (void)snprintf(buf, sizeof(buf), "%.1f m",
                        sqrt(app_max(sel->pos_cov[0], 0.0)));
         ui_readout(c, ui_stack_row(&s, 17), "\xCF\x83 east", buf, UI_C_TEXT_DIM);
@@ -1584,6 +2010,7 @@ static void app_draw_help(App* a)
         "   R                    reset the scenario",
         "   T                    ground-truth overlay",
         "   G                    covariance ellipses",
+        "   H                    history overlays (paths, plots)",
         "   1 .. 6               control panel tab",
         "   F1                   this help",
         "",
@@ -1691,9 +2118,19 @@ static void app_hotkeys(App* a)
             a->step_pending += (int32_t)n;
             break;
         }
-        case 'R': (void)pwr_engine_reset(a->eng); break;
+        case 'R':
+            (void)pwr_engine_reset(a->eng);
+            app_history_clear(a);
+            break;
         case 'T': a->ppi.show_truth = (a->ppi.show_truth != 0) ? 0 : 1; break;
         case 'G': a->ppi.show_gates = (a->ppi.show_gates != 0) ? 0 : 1; break;
+        case 'H':
+        {
+            const int32_t on = (a->ppi.show_track_paths != 0) ? 0 : 1;
+            a->ppi.show_track_paths = on;
+            a->ppi.show_plot_hist   = on;
+            break;
+        }
         case '1': a->tab_ctrl = APP_TAB_WAVEFORM; break;
         case '2': a->tab_ctrl = APP_TAB_PROCESS;  break;
         case '3': a->tab_ctrl = APP_TAB_DETECT;   break;
@@ -1791,11 +2228,17 @@ int app_step(App* a)
         a->have_frame = 1;
         a->stats      = a->frame.stats;
         a->dm         = a->frame.metrics;
+        if (a->frame.sequence != a->hist_last_seq)
+        {
+            app_history_feed(a);
+            a->hist_last_seq = a->frame.sequence;
+        }
     }
     else
     {
         (void)pwr_engine_get_stats(a->eng, &a->stats);
     }
+    a->ppi.hist_retain_s = a->hist_retain_s;
 
     W = ui_plat_width(a->plat);
     H = ui_plat_height(a->plat);

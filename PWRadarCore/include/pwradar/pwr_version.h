@@ -29,7 +29,7 @@
  *  compiled against (this macro) with the value reported by the loaded
  *  binary (pwr_abi_version()) and refuses to run on mismatch.
  * ------------------------------------------------------------------------ */
-#define PWR_ABI_VERSION     3
+#define PWR_ABI_VERSION     4
 
 #define PWR_STRINGIFY_(x)   #x
 #define PWR_STRINGIFY(x)    PWR_STRINGIFY_(x)

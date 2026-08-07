@@ -25,6 +25,7 @@ void ui_ppi_init(UI_Ppi* p)
     p->range_max_full_m = 24000.0;
     p->cmap             = UI_CMAP_PHOSPHOR;
     p->video_gain_db    = 0.0;
+    p->leader_time_s    = 60.0;
     p->show_video       = 1;
     p->show_rings       = 1;
     p->show_beam        = 1;
@@ -34,6 +35,12 @@ void ui_ppi_init(UI_Ppi* p)
     p->show_truth       = 0;
     p->show_labels      = 1;
     p->show_gates       = 0;
+    p->hist_retain_s    = 300.0;
+    p->show_track_paths = 1;
+    p->show_truth_paths = 0;
+    p->show_plot_hist   = 1;
+    p->show_assoc       = 1;
+    p->show_dwell       = 1;
     p->lut_range_max    = -1.0;
 }
 
@@ -357,6 +364,107 @@ static void ui_ppi_draw_beam(UI_Canvas* cv, const UI_Ppi* p, const PWR_Frame* f)
     ui_line(cv, p->cx, p->cy, x1, y1, ui_color_alpha(UI_C_BEAM, 210), 1.6);
 }
 
+/* ==========================================================================
+ *  History overlays
+ * ========================================================================== */
+
+/* Age-faded dots for every plot the detector produced within the retention
+ * window.  Associated plots keep the detection cyan; plots that never joined
+ * a track render amber, so false-alarm scatter and unattended plot strings
+ * stand out against the chains the tracker is consuming. */
+static void ui_ppi_draw_plot_history(UI_Canvas* cv, const UI_Ppi* p,
+                                     double now_s)
+{
+    const UI_PlotHistory* h = p->plot_hist;
+    const double retain = (p->hist_retain_s > 1.0) ? p->hist_retain_s : 1.0;
+    const UI_Color c_orphan = ui_color_mix(UI_C_DETECTION, UI_C_TRACK_TENT, 0.65);
+    int32_t i;
+
+    if (h == NULL) { return; }
+    for (i = 0; i < h->count; ++i)
+    {
+        const UI_PlotMark* m = &h->marks[i];
+        const double range = sqrt((double)m->x_m * (double)m->x_m +
+                                  (double)m->y_m * (double)m->y_m);
+        double f = 1.0 - (now_s - m->t_s) / retain;
+        double x, y;
+        if (range > p->range_max_m * 1.02) { continue; }
+        if (f <= 0.0) { continue; }
+        if (f > 1.0)  { f = 1.0; }
+        ui_ppi_enu_to_px(p, (double)m->x_m, (double)m->y_m, &x, &y);
+        ui_fill_circle(cv, x, y, (m->assoc_track_id > 0) ? 2.0 : 1.7,
+                       ui_color_alpha((m->assoc_track_id > 0)
+                                          ? UI_C_DETECTION : c_orphan,
+                                      (uint8_t)(28.0 + 130.0 * f)));
+    }
+}
+
+/* Full path polylines with age fading.  Dead tracks keep their path until it
+ * ages out and are capped with a cross, so where and when a track was lost
+ * stays readable long after the symbol disappeared. */
+static void ui_ppi_draw_paths(UI_Canvas* cv, const UI_Ppi* p,
+                              const UI_PathSet* s, double now_s,
+                              int truth_style)
+{
+    const double retain = (p->hist_retain_s > 1.0) ? p->hist_retain_s : 1.0;
+    int32_t i;
+
+    if (s == NULL) { return; }
+    for (i = 0; i < s->count; ++i)
+    {
+        const UI_Path* pa = &s->paths[i];
+        const UI_Color base = truth_style ? UI_C_TRUTH
+                                          : ui_track_colour(pa->state);
+        /* Bound the draw cost for very long paths. */
+        const int32_t step = 1 + pa->count / 512;
+        double px = 0.0, py = 0.0;
+        int have = 0;
+        int32_t k;
+
+        for (k = 0; k < pa->count; k += step)
+        {
+            const UI_PathPoint* pt = &pa->pts[k];
+            const double range = sqrt((double)pt->x_m * (double)pt->x_m +
+                                      (double)pt->y_m * (double)pt->y_m);
+            double x, y, f;
+            if (range > p->range_max_m * 1.05) { have = 0; continue; }
+            ui_ppi_enu_to_px(p, (double)pt->x_m, (double)pt->y_m, &x, &y);
+            if (have != 0)
+            {
+                f = 1.0 - (now_s - pt->t_s) / retain;
+                if (f < 0.0) { f = 0.0; }
+                if (f > 1.0) { f = 1.0; }
+                ui_line(cv, px, py, x, y,
+                        ui_color_alpha(base,
+                                       (uint8_t)(18.0 +
+                                                 (truth_style ? 70.0 : 135.0) * f)),
+                        truth_style ? 1.0 : 1.3);
+            }
+            px = x; py = y; have = 1;
+        }
+
+        /* Track-lost marker at the last known position - only for tracks
+         * that had been established.  Retired tentatives are routine false
+         * alarms and would litter the scope with crosses. */
+        if (pa->alive == 0 && pa->count > 0 && truth_style == 0 && have != 0 &&
+            (pa->state == PWR_TRACK_CONFIRMED || pa->state == PWR_TRACK_COASTING))
+        {
+            ui_marker(cv, UI_MARKER_CROSS, px, py, 7.0,
+                      ui_color_alpha(base, 130), UI_RGBA(0, 0, 0, 0), 1.1);
+        }
+    }
+}
+
+static const PWR_Track* ui_ppi_find_track(const PWR_Frame* f, int32_t id)
+{
+    uint32_t i;
+    for (i = 0u; i < f->track_count; ++i)
+    {
+        if ((int32_t)f->tracks[i].id == id) { return &f->tracks[i]; }
+    }
+    return NULL;
+}
+
 static void ui_ppi_draw_detections(UI_Canvas* cv, const UI_Ppi* p,
                                    const PWR_Frame* f)
 {
@@ -368,6 +476,19 @@ static void ui_ppi_draw_detections(UI_Canvas* cv, const UI_Ppi* p,
         double x, y;
         if (d->range_m > p->range_max_m) { continue; }
         ui_ppi_polar_to_px(p, d->range_m, d->azimuth_deg, &x, &y);
+
+        /* Association line: which track consumed this plot in this dwell. */
+        if (p->show_assoc != 0 && d->assoc_track_id > 0)
+        {
+            const PWR_Track* t = ui_ppi_find_track(f, d->assoc_track_id);
+            if (t != NULL)
+            {
+                double tx, ty;
+                ui_ppi_enu_to_px(p, t->x_m, t->y_m, &tx, &ty);
+                ui_line(cv, x, y, tx, ty,
+                        ui_color_alpha(UI_C_DETECTION, 110), 1.0);
+            }
+        }
         ui_marker(cv, UI_MARKER_PLUS, x, y, 9.0,
                   ui_color_alpha(UI_C_DETECTION, 220), UI_RGBA(0, 0, 0, 0), 1.3);
     }
@@ -493,18 +614,65 @@ static void ui_ppi_draw_tracks(UI_Canvas* cv, const UI_Ppi* p, const PWR_Frame* 
             ui_arc(cv, x, y, 9.0, 0.0, UI_PI * 0.5, col, 1.2);
             ui_arc(cv, x, y, 9.0, UI_PI, UI_PI * 1.5, col, 1.2);
         }
+        /* Dwell feedback: the beam was on this track this CPI - green ring
+         * for an associated plot (hit), red dashed ring for a miss.  This is
+         * the per-dwell evidence the M-of-N confirmation counts. */
+        if (p->show_dwell != 0)
+        {
+            if (t->dwell_state == PWR_DWELL_HIT)
+            {
+                ui_frame_circle(cv, x, y, sel ? 20.0 : 15.0,
+                                ui_color_alpha(UI_C_OK, 170), 1.5);
+            }
+            else if (t->dwell_state == PWR_DWELL_MISS)
+            {
+                ui_arc(cv, x, y, sel ? 20.0 : 15.0, 0.25 * UI_PI, 0.75 * UI_PI,
+                       ui_color_alpha(UI_C_ALARM, 150), 1.5);
+                ui_arc(cv, x, y, sel ? 20.0 : 15.0, 1.25 * UI_PI, 1.75 * UI_PI,
+                       ui_color_alpha(UI_C_ALARM, 150), 1.5);
+            }
+        }
         if (sel != 0)
         {
             ui_frame_circle(cv, x, y, 17.0, ui_color_alpha(UI_C_FOCUS, 200), 1.4);
         }
 
-        /* ---- velocity leader (one minute of travel) --------------------- */
+        /* ---- velocity vector ---------------------------------------------
+         *  Direction-of-movement arrow in the MIL-STD-2525 style: the tip
+         *  marks where the track will be after leader_time_s at the current
+         *  velocity, the arrowhead makes the sense of motion unambiguous,
+         *  and a tick every 30 s of travel lets speed be read quantitatively
+         *  against the range rings. */
         if (t->speed_mps > 0.5 && t->state != PWR_TRACK_TENTATIVE)
         {
+            const double lt = (p->leader_time_s > 1.0) ? p->leader_time_s : 60.0;
             double lx, ly;
-            ui_ppi_enu_to_px(p, t->x_m + t->vx_mps * 60.0,
-                             t->y_m + t->vy_mps * 60.0, &lx, &ly);
-            ui_line(cv, x, y, lx, ly, ui_color_alpha(col, 190), 1.4);
+            ui_ppi_enu_to_px(p, t->x_m + t->vx_mps * lt,
+                             t->y_m + t->vy_mps * lt, &lx, &ly);
+            ui_arrow(cv, x, y, lx, ly, ui_color_alpha(col, 200),
+                     sel ? 2.0 : 1.4, sel ? 9.0 : 7.0);
+            {
+                const double seg = sqrt((lx - x) * (lx - x) +
+                                        (ly - y) * (ly - y));
+                const double tick_dt = 30.0;
+                const double spacing = (lt > 0.0) ? (seg * tick_dt / lt) : 0.0;
+                /* Suppress the ticks when they would smear together. */
+                if (seg > 26.0 && spacing > 9.0)
+                {
+                    const double upx = -(ly - y) / seg;
+                    const double upy =  (lx - x) / seg;
+                    double tt;
+                    for (tt = tick_dt; tt < lt - 1.0; tt += tick_dt)
+                    {
+                        const double fr = tt / lt;
+                        const double tx = x + (lx - x) * fr;
+                        const double ty = y + (ly - y) * fr;
+                        ui_line(cv, tx - upx * 2.6, ty - upy * 2.6,
+                                tx + upx * 2.6, ty + upy * 2.6,
+                                ui_color_alpha(col, 190), 1.2);
+                    }
+                }
+            }
         }
 
         if (p->show_gates != 0) { ui_ppi_draw_covariance(cv, p, t, col); }
@@ -542,6 +710,32 @@ static void ui_ppi_draw_truth(UI_Canvas* cv, const UI_Ppi* p, const PWR_Frame* f
         ui_ppi_enu_to_px(p, t->x_m, t->y_m, &x, &y);
         ui_marker(cv, UI_MARKER_CROSS, x, y, 11.0,
                   ui_color_alpha(UI_C_TRUTH, 190), UI_RGBA(0, 0, 0, 0), 1.2);
+
+        /* True course as a dashed arrow on the same leader time base, so the
+         * course error of the paired track reads directly as the angle
+         * between the solid and the dashed arrowheads. */
+        {
+            const double sp = sqrt(t->vx_mps * t->vx_mps +
+                                   t->vy_mps * t->vy_mps);
+            if (sp > 0.5)
+            {
+                const double lt = (p->leader_time_s > 1.0)
+                                ? p->leader_time_s : 60.0;
+                double lx, ly, seg;
+                ui_ppi_enu_to_px(p, t->x_m + t->vx_mps * lt,
+                                 t->y_m + t->vy_mps * lt, &lx, &ly);
+                seg = sqrt((lx - x) * (lx - x) + (ly - y) * (ly - y));
+                ui_line_dash(cv, x, y, lx, ly,
+                             ui_color_alpha(UI_C_TRUTH, 150), 1.0, 4.0, 4.0);
+                if (seg > 8.0)
+                {
+                    const double ux = (lx - x) / seg;
+                    const double uy = (ly - y) / seg;
+                    ui_arrow(cv, lx - ux * 8.0, ly - uy * 8.0, lx, ly,
+                             ui_color_alpha(UI_C_TRUTH, 170), 1.0, 6.0);
+                }
+            }
+        }
         if (p->show_labels != 0 && t->label[0] != '\0')
         {
             (void)snprintf(buf, sizeof(buf), "%s", t->label);
@@ -563,6 +757,23 @@ void ui_ppi_draw(UI_Canvas* cv, UI_Ppi* p, const PWR_Frame* f)
         ui_ppi_draw_video(cv, p, f);
     }
     if (p->show_rings != 0)      { ui_ppi_draw_rings(cv, p); }
+    if (f != NULL)
+    {
+        /* History under the live symbology so plots and paths never obscure
+         * the current picture. */
+        if (p->show_plot_hist != 0)
+        {
+            ui_ppi_draw_plot_history(cv, p, f->time_s);
+        }
+        if (p->show_truth_paths != 0)
+        {
+            ui_ppi_draw_paths(cv, p, p->truth_paths, f->time_s, 1);
+        }
+        if (p->show_track_paths != 0)
+        {
+            ui_ppi_draw_paths(cv, p, p->track_paths, f->time_s, 0);
+        }
+    }
     if (p->show_beam != 0)       { ui_ppi_draw_beam(cv, p, f); }
     if (p->show_truth != 0)      { ui_ppi_draw_truth(cv, p, f); }
     if (p->show_detections != 0) { ui_ppi_draw_detections(cv, p, f); }
