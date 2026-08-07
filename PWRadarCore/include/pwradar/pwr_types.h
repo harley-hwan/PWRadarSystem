@@ -226,6 +226,9 @@ typedef struct PWR_TrackerConfig
     double   min_speed_for_course;  /* below this, course is held             */
     int32_t  enable;                /* 1 => run tracker                        */
     int32_t  assoc_mode;            /* PWR_AssocMode                           */
+    /* M-of-N unit: one update attempt is booked per antenna revolution on a
+     * rotating radar (plots are dwell-merged, one per target per scan) and
+     * per CPI when the antenna is staring. */
     int32_t  confirm_m;             /* confirm on M hits ...                  */
     int32_t  confirm_n;             /* ... within the last N update attempts  */
     int32_t  delete_misses;         /* terminate after this many consecutive  */
@@ -377,7 +380,8 @@ typedef struct PWR_SimEnvironment
 typedef struct PWR_Detection
 {
     double   range_m;
-    double   azimuth_deg;           /* beam centre, monopulse refined         */
+    double   azimuth_deg;           /* power-weighted dwell centroid (beam
+                                     * splitting); boresight while staring    */
     double   radial_velocity_mps;   /* positive == opening (receding)         */
     double   time_s;
     double   amplitude_db;          /* post-integration magnitude, dB         */

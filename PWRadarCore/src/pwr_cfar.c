@@ -448,7 +448,7 @@ static int pwr_detection_cmp_desc(const PWR_Detection* a, const PWR_Detection* b
     return (a->snr_db > b->snr_db) ? -1 : ((a->snr_db < b->snr_db) ? 1 : 0);
 }
 
-static void pwr_detections_sort(PWR_Detection* d, uint32_t n)
+void pwr_detections_sort(PWR_Detection* d, uint32_t n)
 {
     uint32_t i;
     for (i = 1u; i < n; ++i)
@@ -601,4 +601,122 @@ void pwr_cluster_run(struct PWR_Engine* e)
     }
 
     pwr_detections_sort(e->detections, e->detection_count);
+}
+
+/* ==========================================================================
+ *  Dwell-level plot centroiding (azimuth beam splitting)
+ * ==========================================================================
+ *  The per-CPI plots above carry the beam boresight as their azimuth, and a
+ *  strong target stays above threshold for several consecutive CPIs while
+ *  the beam sweeps across it.  Left unmerged, one target therefore produces
+ *  a string of plots spread over degrees of azimuth every scan: the leftover
+ *  plots escape the initiation-inhibit radius and seed duplicate tracks, and
+ *  the CPI-to-CPI azimuth stepping injects a bogus tangential velocity into
+ *  any track that follows the string.
+ *
+ *  This pass does what an operational plot extractor does: per-CPI hits that
+ *  agree in range and radial velocity across consecutive CPIs accumulate
+ *  into one dwell plot, and when the beam moves past (one CPI with no new
+ *  contribution) the plot is closed and emitted with power-weighted
+ *  centroids.  The azimuth centroid across the two-way beam shape is the
+ *  classic beam-splitting estimator, accurate to a fraction of a beamwidth.
+ *
+ *  The range/velocity gates are deliberately tight - about one output cell -
+ *  so genuinely resolved targets (the scenario-4 resolution pair at 1.2
+ *  range cells, or a Doppler-separated pair in the same gate) are never
+ *  merged; same-CPI plots are never merged with each other for the same
+ *  reason.  While the antenna is staring a dwell has no natural end, so the
+ *  pass is bypassed and plots flow through per CPI exactly as before.
+ * ------------------------------------------------------------------------ */
+void pwr_plots_dwell_merge(struct PWR_Engine* e)
+{
+    const uint32_t cpi   = (uint32_t)e->stats.cpi_count;
+    const double   r_tol = 1.25 * e->axis_range_step_m;
+    const double   v_tol = 1.5 * fabs(e->axis_vel_step_mps);
+    uint32_t i, k, n_out = 0u;
+
+    if (e->dm.scan_period_s <= 0.0) { return; }      /* staring: no dwell end */
+
+    /* ---- 1. fold this CPI's plots into the open dwell plots ------------- */
+    for (i = 0u; i < e->detection_count; ++i)
+    {
+        const PWR_Detection* d = &e->detections[i];
+        const double w  = pwr_db_to_pow(d->snr_db);
+        const double az = pwr_deg_to_rad(d->azimuth_deg);
+        PWR_DwellPlot* best = NULL;
+        double best_dr = r_tol;
+
+        for (k = 0u; k < PWR_MAX_DETECTIONS; ++k)
+        {
+            PWR_DwellPlot* dp = &e->dwell[k];
+            double dr, dv;
+            /* Only a dwell fed in the immediately preceding CPI may grow:
+             * same-CPI plots are distinct targets by construction, and a
+             * gap means the beam has left. */
+            if (dp->active == 0 || dp->last_cpi == cpi ||
+                (cpi - dp->last_cpi) > 1u) { continue; }
+            dr = fabs(d->range_m - dp->wrange_sum / dp->w_sum);
+            dv = fabs(d->radial_velocity_mps - dp->wvel_sum / dp->w_sum);
+            if (dr <= best_dr && dv <= v_tol)
+            {
+                best    = dp;
+                best_dr = dr;
+            }
+        }
+        if (best == NULL)
+        {
+            for (k = 0u; k < PWR_MAX_DETECTIONS; ++k)
+            {
+                if (e->dwell[k].active == 0) { best = &e->dwell[k]; break; }
+            }
+            if (best == NULL) { continue; }          /* table full: drop */
+            memset(best, 0, sizeof(*best));
+            best->active = 1;
+            best->peak_w = -1.0;
+        }
+        best->w_sum      += w;
+        best->waz_e      += w * sin(az);
+        best->waz_n      += w * cos(az);
+        best->wrange_sum += w * d->range_m;
+        best->wvel_sum   += w * d->radial_velocity_mps;
+        best->cells      += d->cell_count;
+        best->cpi_count  += 1u;
+        best->last_cpi    = cpi;
+        if (w > best->peak_w)
+        {
+            best->peak   = *d;
+            best->peak_w = w;
+        }
+    }
+
+    /* ---- 2. close and emit every dwell the beam has moved past ---------- */
+    for (k = 0u; k < PWR_MAX_DETECTIONS; ++k)
+    {
+        PWR_DwellPlot* dp = &e->dwell[k];
+        if (dp->active == 0 || dp->last_cpi == cpi) { continue; }
+        /* A gap of exactly one CPI is the normal end of a dwell.  Anything
+         * older can only mean the merge was bypassed in between (scan rate
+         * toggled through zero): that dwell is stale and must be dropped,
+         * or it would re-emit a plot the staring CPI already published. */
+        if ((cpi - dp->last_cpi) == 1u && dp->w_sum > 0.0 &&
+            n_out < PWR_MAX_DETECTIONS)
+        {
+            PWR_Detection* out = &e->dwell_emit[n_out++];
+            *out = dp->peak;
+            out->range_m             = dp->wrange_sum / dp->w_sum;
+            out->radial_velocity_mps = dp->wvel_sum / dp->w_sum;
+            out->azimuth_deg         = pwr_wrap360(
+                pwr_rad_to_deg(atan2(dp->waz_e, dp->waz_n)));
+            out->cell_count          = dp->cells;
+            out->assoc_track_id      = 0;
+        }
+        /* Older leftovers (mode switch while dwells were open) are stale
+         * and dropped rather than emitted. */
+        dp->active = 0;
+    }
+
+    /* ---- 3. the tracker and the frame consume the closed dwells --------- */
+    memcpy(e->detections, e->dwell_emit, (size_t)n_out * sizeof(PWR_Detection));
+    e->detection_count = n_out;
+    pwr_detections_sort(e->detections, n_out);
 }

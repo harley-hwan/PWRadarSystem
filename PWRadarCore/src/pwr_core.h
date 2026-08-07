@@ -97,6 +97,25 @@ typedef struct PWR_CfarWork
     uint32_t  cells_hit;
 } PWR_CfarWork;
 
+/* One plot under construction across the CPIs of a beam dwell.  A strong
+ * target stays above threshold for several consecutive CPIs while the beam
+ * sweeps across it; folding those per-CPI hits into a single power-weighted
+ * plot (azimuth beam splitting) is what keeps one target from producing a
+ * string of plots spread over degrees of azimuth. */
+typedef struct PWR_DwellPlot
+{
+    PWR_Detection peak;           /* strongest contributing per-CPI plot      */
+    double   peak_w;              /* its linear-SNR weight                    */
+    double   w_sum;               /* total linear-SNR weight                  */
+    double   waz_e, waz_n;        /* weighted azimuth unit vector (wrap safe) */
+    double   wrange_sum;          /* weighted range sum [m]                   */
+    double   wvel_sum;            /* weighted radial velocity sum             */
+    uint32_t cpi_count;           /* contributing CPIs                        */
+    uint32_t last_cpi;            /* CPI index of the newest contribution     */
+    uint32_t cells;               /* summed cell count                        */
+    int32_t  active;
+} PWR_DwellPlot;
+
 /* ==========================================================================
  *  4.  Tracker
  * ========================================================================== */
@@ -116,6 +135,11 @@ typedef struct PWR_TrackInternal
     int32_t  state;               /* PWR_TrackState                           */
     int32_t  target_class;
     int32_t  dwell_state;         /* PWR_DWELL_*, refreshed every CPI         */
+    /* Rotating-antenna scan bookkeeping: a plot association raises
+     * hit_this_scan; the M-of-N attempt is booked once per revolution, when
+     * the beam has swept past the track, and consumes the flag. */
+    int32_t  hit_this_scan;
+    double   last_attempt_time_s;
     float    snr_db;
     float    innovation_norm;
     double   first_time_s;
@@ -148,6 +172,9 @@ typedef struct PWR_Tracker
     /* In-beam candidate list for this CPI. */
     int32_t* cand;                /* [PWR_MAX_TRACKS]                        */
     uint32_t cost_rows, cost_cols;
+    /* Boresight at the previous CPI, for detecting when the beam crosses a
+     * track's azimuth (the per-scan M-of-N attempt boundary). */
+    double   last_beam_az_deg;
 } PWR_Tracker;
 
 #define PWR_ASSOC_DIM \
@@ -263,6 +290,10 @@ struct PWR_Engine
     int32_t*            cluster_label;  /* [n_doppler*n_range]                */
     int32_t*            cluster_stack;  /* [n_doppler*n_range] flood-fill      */
 
+    /* ---- dwell plot centroiding (rotating antenna only) ------------------ */
+    PWR_DwellPlot       dwell[PWR_MAX_DETECTIONS];
+    PWR_Detection       dwell_emit[PWR_MAX_DETECTIONS];
+
     /* ---- tracker -------------------------------------------------------- */
     PWR_Tracker         tracker;
 
@@ -375,6 +406,12 @@ PWR_Status pwr_cfar_alloc(PWR_CfarWork* w, uint32_t n_doppler, uint32_t n_range,
 void       pwr_cfar_release(PWR_CfarWork* w);
 void       pwr_cfar_run(struct PWR_Engine* e);
 void       pwr_cluster_run(struct PWR_Engine* e);
+void       pwr_detections_sort(PWR_Detection* d, uint32_t n);
+
+/** Folds this CPI's per-CPI plots into dwell plots and replaces
+ *  e->detections with the dwells the beam has finished sweeping past.
+ *  No-op while the antenna is staring (a dwell would never end). */
+void       pwr_plots_dwell_merge(struct PWR_Engine* e);
 
 /* --- tracker ------------------------------------------------------------ */
 PWR_Status pwr_tracker_init(PWR_Tracker* t);

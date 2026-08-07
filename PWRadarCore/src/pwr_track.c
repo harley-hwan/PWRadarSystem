@@ -106,6 +106,7 @@ void pwr_tracker_reset(PWR_Tracker* t)
     t->deleted_total = 0u;
     t->cost_rows     = 0u;
     t->cost_cols     = 0u;
+    t->last_beam_az_deg = 0.0;
 }
 
 /* ==========================================================================
@@ -350,6 +351,54 @@ static uint32_t pwr_popcount32(uint32_t v)
     return (v * 0x01010101u) >> 24u;
 }
 
+/* Books one M-of-N attempt - per CPI while staring, per scan while rotating -
+ * and applies the confirmation / termination rules.  The caller is expected
+ * to have done the hit-side bookkeeping (KF update, hit counters) already. */
+static void pwr_track_book_attempt(PWR_Tracker* tr, PWR_TrackInternal* tk,
+                                   const PWR_TrackerConfig* cfg, int hit)
+{
+    ++tk->update_attempts;
+    tk->history_bits <<= 1u;
+    if (hit != 0)
+    {
+        tk->history_bits |= 1u;
+    }
+    else
+    {
+        if (tk->dwell_state == PWR_DWELL_IDLE)
+        {
+            tk->dwell_state = PWR_DWELL_MISS;
+        }
+        ++tk->misses;
+        ++tk->consecutive_misses;
+        tk->score -= 1.5;
+    }
+    {
+        const uint32_t mask = (cfg->confirm_n >= 32)
+            ? 0xFFFFFFFFu : ((1u << (uint32_t)cfg->confirm_n) - 1u);
+        const uint32_t recent = pwr_popcount32(tk->history_bits & mask);
+
+        if (tk->state == PWR_TRACK_TENTATIVE &&
+            recent >= (uint32_t)cfg->confirm_m)
+        {
+            tk->state = PWR_TRACK_CONFIRMED;
+        }
+        if (tk->consecutive_misses >= (uint32_t)cfg->delete_misses ||
+            (tk->state == PWR_TRACK_TENTATIVE &&
+             tk->consecutive_misses >= (uint32_t)cfg->coast_misses &&
+             tk->hits < 2u))
+        {
+            tk->state = PWR_TRACK_FREE;
+            ++tr->deleted_total;
+        }
+        else if (tk->state == PWR_TRACK_CONFIRMED &&
+                 tk->consecutive_misses >= (uint32_t)cfg->coast_misses)
+        {
+            tk->state = PWR_TRACK_COASTING;
+        }
+    }
+}
+
 static void pwr_trail_push(PWR_TrackInternal* tk, double time_s)
 {
     if (tk->trail_count > 0u && (time_s - tk->trail_last_time_s) < PWR_TRAIL_PERIOD_S)
@@ -412,6 +461,8 @@ static uint32_t pwr_track_init_from_detection(PWR_Tracker* tr,
     tk->update_attempts     = 1u;
     tk->history_bits        = 1u;
     tk->dwell_state         = PWR_DWELL_HIT;    /* born from this dwell's plot */
+    tk->hit_this_scan       = 0;    /* the birth attempt is already booked     */
+    tk->last_attempt_time_s = time_s;
     tk->snr_db              = (float)det->snr_db;
     tk->first_time_s        = time_s;
     tk->last_meas_time_s    = time_s;
@@ -440,6 +491,12 @@ void pwr_tracker_update(struct PWR_Engine* e)
     /* Zero when the antenna is staring, which disables the scan-based
      * staleness rule and leaves the per-CPI M-of-N logic in sole charge. */
     const double scan_period = e->dm.scan_period_s;
+    /* Rotating antenna: plots are dwell-centroided and emitted after the
+     * beam has left the target, so candidacy keys on the plots themselves
+     * and the M-of-N attempt is booked once per revolution (step 5b).
+     * Staring: plots flow per CPI and the classic per-CPI logic stays in
+     * charge. */
+    const int rotating = (scan_period > 0.0) ? 1 : 0;
     uint32_t n_cand = 0u;
     uint32_t i, c;
 
@@ -490,8 +547,11 @@ void pwr_tracker_update(struct PWR_Engine* e)
         if (scan_period > 0.0)
         {
             const double missed = (now - tk->last_meas_time_s) / scan_period;
+            /* With per-scan attempt booking the M-of-N counters retire dead
+             * tracks by themselves; this stays as a backstop with a longer
+             * fuse rather than pre-empting the operator's delete setting. */
             const double kill_confirmed =
-                pwr_maxd(2.0, 0.5 * (double)cfg->delete_misses);
+                pwr_maxd(2.0, (double)cfg->delete_misses + 2.0);
             if (tk->state == PWR_TRACK_TENTATIVE && missed > 1.5)
             {
                 tk->state = PWR_TRACK_FREE;
@@ -510,10 +570,38 @@ void pwr_tracker_update(struct PWR_Engine* e)
             }
         }
 
-        /* ---- 3. build the in-beam candidate list ------------------------ */
+        /* ---- 3. build the association candidate list -------------------- */
         {
             const double az = pwr_wrap360(pwr_rad_to_deg(atan2(tk->X[0], tk->X[1])));
-            if (fabs(pwr_angle_diff(az, beam)) <= arc && n_cand < PWR_MAX_TRACKS)
+            int in = 0;
+            if (rotating == 0)
+            {
+                in = (fabs(pwr_angle_diff(az, beam)) <= arc) ? 1 : 0;
+            }
+            else
+            {
+                /* Metric pre-gate against every emitted plot, mirroring the
+                 * rectangular pre-gate of the cost matrix.  A fixed azimuth
+                 * window here would be tighter than the statistical gate and
+                 * would cut fast crossing targets off from their own tracks:
+                 * a radially seeded track predicts a frozen azimuth, and at
+                 * 2 km a 150 m/s crossing target moves ten degrees per scan
+                 * while still being only 375 m from the prediction. */
+                uint32_t d;
+                for (d = 0u; d < e->detection_count && in == 0; ++d)
+                {
+                    const PWR_Detection* dd = &e->detections[d];
+                    const double azr = pwr_deg_to_rad(dd->azimuth_deg);
+                    if (fabs(dd->range_m * sin(azr) - tk->X[0])
+                            <= cfg->gate_max_range_m &&
+                        fabs(dd->range_m * cos(azr) - tk->X[1])
+                            <= cfg->gate_max_range_m)
+                    {
+                        in = 1;
+                    }
+                }
+            }
+            if (in != 0 && n_cand < PWR_MAX_TRACKS)
             {
                 tr->cand[n_cand++] = (int32_t)i;
             }
@@ -561,14 +649,26 @@ void pwr_tracker_update(struct PWR_Engine* e)
                             if (cfg->use_doppler_in_gate != 0)
                             {
                                 /* Predicted range rate along the plot's line
-                                 * of sight versus the measured one. */
+                                 * of sight versus the measured one.  The
+                                 * measurement arrives folded into the
+                                 * unambiguous interval, so the comparison is
+                                 * taken modulo 2*Vua: without the fold, a
+                                 * converged track on a target whose true
+                                 * range rate crosses the ambiguity boundary
+                                 * rejects every subsequent plot and starves. */
                                 const double ux = sin(az), uy = cos(az);
                                 const double pred = tk->X[2] * ux + tk->X[3] * uy;
-                                const double dv = fabs(pred - det->radial_velocity_mps);
+                                const double vua2 =
+                                    2.0 * e->dm.unambiguous_velocity_mps;
                                 const double lim = cfg->gate_sigma *
                                     (cfg->meas_sigma_velocity_mps +
                                      sqrt(pwr_maxd(tk->P[10] + tk->P[15], 0.0)));
-                                if (dv > lim) { ok = 0; }
+                                double dv = pred - det->radial_velocity_mps;
+                                if (vua2 > 0.0)
+                                {
+                                    dv -= vua2 * floor(dv / vua2 + 0.5);
+                                }
+                                if (fabs(dv) > lim) { ok = 0; }
                             }
                             if (ok != 0) { cost = d2 + logdet; }
                         }
@@ -631,14 +731,11 @@ void pwr_tracker_update(struct PWR_Engine* e)
             }
         }
 
-        /* ---- 5. update / miss ------------------------------------------- */
+        /* ---- 5. plot association bookkeeping ----------------------------- */
         for (i = 0u; i < n_cand; ++i)
         {
             PWR_TrackInternal* tk = &tr->tracks[tr->cand[i]];
             const int32_t j = (nd > 0u) ? tr->row_assign[i] : -1;
-
-            ++tk->update_attempts;
-            tk->history_bits <<= 1u;
 
             if (j >= 0)
             {
@@ -661,7 +758,35 @@ void pwr_tracker_update(struct PWR_Engine* e)
                 e->detections[j].assoc_track_id = (int32_t)tk->id;
                 tk->dwell_state = PWR_DWELL_HIT;
 
-                tk->history_bits      |= 1u;
+                if (rotating != 0 &&
+                    now - tk->last_attempt_time_s < 0.5 * scan_period &&
+                    (tk->history_bits & 1u) == 0u)
+                {
+                    /* This revolution's attempt was already booked as a miss:
+                     * the crossing fired on a lagging prediction before the
+                     * dwell plot could be emitted.  Repair the books instead
+                     * of losing a real hit to the second-crossing dedupe. */
+                    tk->history_bits |= 1u;
+                    if (tk->misses > 0u)             { --tk->misses; }
+                    if (tk->consecutive_misses > 0u) { --tk->consecutive_misses; }
+                    tk->score += 1.5;
+                    {
+                        const uint32_t mask = (cfg->confirm_n >= 32)
+                            ? 0xFFFFFFFFu
+                            : ((1u << (uint32_t)cfg->confirm_n) - 1u);
+                        if (tk->state == PWR_TRACK_TENTATIVE &&
+                            pwr_popcount32(tk->history_bits & mask) >=
+                                (uint32_t)cfg->confirm_m)
+                        {
+                            tk->state = PWR_TRACK_CONFIRMED;
+                        }
+                    }
+                }
+                else
+                {
+                    tk->hit_this_scan = 1;
+                }
+
                 ++tk->hits;
                 tk->consecutive_misses = 0u;
                 tk->snr_db = (float)(0.7 * (double)tk->snr_db +
@@ -675,38 +800,13 @@ void pwr_tracker_update(struct PWR_Engine* e)
                     tk->state = PWR_TRACK_CONFIRMED;
                 }
             }
-            else
-            {
-                tk->dwell_state = PWR_DWELL_MISS;
-                ++tk->misses;
-                ++tk->consecutive_misses;
-                tk->score -= 1.5;
-            }
 
-            /* ---- M-of-N confirmation and termination -------------------- */
+            if (rotating == 0)
             {
-                const uint32_t mask = (cfg->confirm_n >= 32)
-                    ? 0xFFFFFFFFu : ((1u << (uint32_t)cfg->confirm_n) - 1u);
-                const uint32_t recent = pwr_popcount32(tk->history_bits & mask);
-
-                if (tk->state == PWR_TRACK_TENTATIVE &&
-                    recent >= (uint32_t)cfg->confirm_m)
-                {
-                    tk->state = PWR_TRACK_CONFIRMED;
-                }
-                if (tk->consecutive_misses >= (uint32_t)cfg->delete_misses ||
-                    (tk->state == PWR_TRACK_TENTATIVE &&
-                     tk->consecutive_misses >= (uint32_t)cfg->coast_misses &&
-                     tk->hits < 2u))
-                {
-                    tk->state = PWR_TRACK_FREE;
-                    ++tr->deleted_total;
-                }
-                else if (tk->state == PWR_TRACK_CONFIRMED &&
-                         tk->consecutive_misses >= (uint32_t)cfg->coast_misses)
-                {
-                    tk->state = PWR_TRACK_COASTING;
-                }
+                /* Staring antenna: every CPI is an independent dwell, so the
+                 * M-of-N attempt is booked right here, as it always was. */
+                pwr_track_book_attempt(tr, tk, cfg, (j >= 0) ? 1 : 0);
+                tk->hit_this_scan = 0;
             }
 
             if (tk->state != PWR_TRACK_FREE)
@@ -715,6 +815,61 @@ void pwr_tracker_update(struct PWR_Engine* e)
                 tk->target_class = pwr_classify(sp);
                 pwr_trail_push(tk, now);
             }
+        }
+
+        /* ---- 5b. per-scan attempt booking (rotating antenna) --------------
+         *  Dwell-merged plots arrive only after the beam has left the target,
+         *  so an attempt cannot be judged per CPI of illumination.  Instead
+         *  one attempt is booked per revolution, at the moment the boresight
+         *  sweeps LAG degrees past the track's azimuth - by which time the
+         *  dwell plot, if the target produced one, has been emitted and
+         *  associated (raising hit_this_scan). */
+        if (rotating != 0)
+        {
+            const double deg_per_cpi = 360.0 * e->dm.cpi_duration_s / scan_period;
+            const double lag   = 1.6 * e->cfg.azimuth_beamwidth_deg +
+                                 2.0 * deg_per_cpi;
+            const double prev  = tr->last_beam_az_deg;
+            const double sweep = pwr_wrap360(beam - prev);
+
+            for (i = 0u; i < PWR_MAX_TRACKS; ++i)
+            {
+                PWR_TrackInternal* tk = &tr->tracks[i];
+                double gate_az, d1;
+                int crossed, overdue;
+                if (tk->state == PWR_TRACK_FREE) { continue; }
+                gate_az = pwr_wrap360(
+                    pwr_rad_to_deg(atan2(tk->X[0], tk->X[1])) + lag);
+                d1 = pwr_wrap360(gate_az - prev);
+                crossed = (d1 > 1e-9 && d1 <= sweep) ? 1 : 0;
+                /* The geometric crossing can be hopped over by a gate moving
+                 * against the rotation (retrograde apparent motion) or by a
+                 * KF azimuth jump; a time-based catch-up guarantees roughly
+                 * one attempt per revolution regardless. */
+                overdue = (now - tk->last_attempt_time_s > 1.25 * scan_period)
+                        ? 1 : 0;
+                if (crossed == 0 && overdue == 0) { continue; }
+                if (crossed != 0 &&
+                    now - tk->last_attempt_time_s < 0.5 * scan_period)
+                {
+                    /* Second crossing of the same revolution (initiation, a
+                     * repair, or a KF azimuth jump): already on the books. */
+                    tk->hit_this_scan = 0;
+                    continue;
+                }
+                pwr_track_book_attempt(tr, tk, cfg,
+                                       (tk->hit_this_scan != 0) ? 1 : 0);
+                tk->hit_this_scan       = 0;
+                tk->last_attempt_time_s = now;
+                if (tk->state != PWR_TRACK_FREE)
+                {
+                    const double sp = sqrt(tk->X[2] * tk->X[2] +
+                                           tk->X[3] * tk->X[3]);
+                    tk->target_class = pwr_classify(sp);
+                    pwr_trail_push(tk, now);
+                }
+            }
+            tr->last_beam_az_deg = beam;
         }
 
         /* ---- 6. initiate tracks from unassigned plots --------------------

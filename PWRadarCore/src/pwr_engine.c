@@ -284,6 +284,8 @@ static PWR_Status pwr_engine_alloc_buffers(PWR_Engine* e)
 
     pwr_engine_free_buffers(e);
     pwr_engine_compute_dims(e);
+    /* Open dwell plots carry the old grid's units; start afresh. */
+    memset(e->dwell, 0, sizeof(e->dwell));
 
     st = pwr_fft_plan_create(&e->plan_fast, e->n_fast_fft);
     if (st != PWR_STATUS_OK) { pwr_set_error(e, "fast-time FFT plan (%u) failed", e->n_fast_fft); return st; }
@@ -625,6 +627,7 @@ static void pwr_engine_process_cpi(PWR_Engine* e)
 
     t0 = t1;
     pwr_cluster_run(e);
+    pwr_plots_dwell_merge(e);
     t1 = pwr_plat_now_s();
     e->stats.t_cluster_ms = pwr_ewma(e->stats.t_cluster_ms, (t1 - t0) * 1e3, alpha);
 
@@ -1003,6 +1006,7 @@ PWR_EXPORT(PWR_Status) pwr_engine_reset(PWR_Engine* eng)
     eng->beam_azimuth_deg = 0.0;
     eng->rti_head = 0u;
     eng->detection_count = 0u;
+    memset(eng->dwell, 0, sizeof(eng->dwell));
     eng->last_cpi_wall_s = 0.0;
     eng->rate_ewma = 0.0;
     eng->wall_origin_s = pwr_plat_now_s();
