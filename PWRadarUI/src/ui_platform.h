@@ -89,7 +89,10 @@ typedef struct UI_Event
     int32_t  type;          /* UI_EventType                                   */
     int32_t  x, y;          /* cursor position in client pixels               */
     int32_t  button;        /* UI_MouseButton for the button events           */
-    int32_t  wheel;         /* signed detents, +1 == scroll away from user    */
+    int32_t  wheel;         /* UI_EV_WHEEL: signed detents, +1 == scroll away
+                             * from the user.  UI_EV_MOUSE_DOWN: the value 2
+                             * marks a double click - both back ends
+                             * synthesise it and ui_ctx_event() decodes it.   */
     int32_t  key;           /* UI_Key / ASCII for key events                  */
     uint32_t mods;          /* UI_Modifier bitmask                            */
     int32_t  width, height; /* new client size for UI_EV_RESIZE               */

@@ -38,10 +38,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef UI_PI
-#define UI_PI 3.14159265358979323846
-#endif
-
 /* ==========================================================================
  *  Small helpers
  * ========================================================================== */
@@ -341,13 +337,10 @@ static void app_draw_toolbar(App* a, UI_Rect r)
                       buf);
     }
 
-    /* ---- help ----------------------------------------------------------- */
-    if (ui_toggle(c, ui_id("tb.help", 0),
-                  ui_rect(r.x + r.w - 40 - UI_M_PAD, by, 40, 26), "?",
-                  &a->show_help) != 0)
-    {
-        /* nothing further: the overlay reads the flag */
-    }
+    /* ---- help: the overlay reads the flag, nothing further to do -------- */
+    (void)ui_toggle(c, ui_id("tb.help", 0),
+                    ui_rect(r.x + r.w - 40 - UI_M_PAD, by, 40, 26), "?",
+                    &a->show_help);
 }
 
 /* ==========================================================================

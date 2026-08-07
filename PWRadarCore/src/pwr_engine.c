@@ -188,13 +188,12 @@ static void pwr_engine_compute_dims(PWR_Engine* e)
     e->n_pulses_valid = (e->n_pulses > order) ? (e->n_pulses - order) : e->n_pulses;
     e->mti_offset     = 0u;
 
-    /* ---- published axes ------------------------------------------------- */
+    /* ---- published range axis --------------------------------------------
+     *  The velocity axis lives in pwr_engine_refresh_calibration() instead:
+     *  it depends on the carrier through dm.wavelength_m, which can change on
+     *  the lightweight reconfiguration path where this function never runs. */
     e->axis_range_first_m = (double)e->range_offset * bin_raw;
     e->axis_range_step_m  = e->dm.range_bin_spacing_m;
-    e->axis_vel_step_mps  = e->dm.wavelength_m * cfg->prf_hz /
-                            (2.0 * (double)e->n_doppler);
-    e->axis_vel_first_mps = e->axis_vel_step_mps *
-                            (1.0 - 0.5 * (double)e->n_doppler);
 
     if (e->cursor_range_bin >= e->n_range)
     {
@@ -202,10 +201,30 @@ static void pwr_engine_compute_dims(PWR_Engine* e)
     }
 }
 
-/* Recomputes everything that depends on the tapers, the compression filter or
- * the STC setting but not on any buffer dimension.  Called both from the full
- * allocation path and from the lightweight reconfiguration path, so a change of
- * taper never has to discard the PPI history or the track file. */
+/* Rebuilds the R^2 sensitivity-time-control ramp for the current geometry.
+ * Shared by the calibration refresh and pwr_engine_set_stc() so the two can
+ * never drift apart. */
+static void pwr_engine_update_stc_gain(PWR_Engine* e)
+{
+    uint32_t i;
+    if (e->stc_gain == NULL) { return; }
+    for (i = 0u; i < e->n_range; ++i)
+    {
+        const double r = e->axis_range_first_m + (double)i * e->axis_range_step_m;
+        double g = 1.0;
+        if (e->cfg.stc_range_m > 1.0)
+        {
+            g = (r / e->cfg.stc_range_m) * (r / e->cfg.stc_range_m);
+            g = pwr_clampd(g, 1.0e-3, 1.0);
+        }
+        e->stc_gain[i] = (pwr_real)g;
+    }
+}
+
+/* Recomputes everything that depends on the tapers, the compression filter,
+ * the carrier or the STC setting but not on any buffer dimension.  Called both
+ * from the full allocation path and from the lightweight reconfiguration path,
+ * so a change of taper never has to discard the PPI history or the track file. */
 static void pwr_engine_refresh_calibration(PWR_Engine* e)
 {
     uint32_t i;
@@ -229,17 +248,15 @@ static void pwr_engine_refresh_calibration(PWR_Engine* e)
         e->doppler_norm = 1.0 / (e->sigma_pc * sqrt(pwr_maxd(s2, 1e-30)));
     }
 
-    for (i = 0u; i < e->n_range; ++i)
-    {
-        const double r = e->axis_range_first_m + (double)i * e->axis_range_step_m;
-        double g = 1.0;
-        if (e->cfg.stc_range_m > 1.0)
-        {
-            g = (r / e->cfg.stc_range_m) * (r / e->cfg.stc_range_m);
-            g = pwr_clampd(g, 1.0e-3, 1.0);
-        }
-        e->stc_gain[i] = (pwr_real)g;
-    }
+    /* Published velocity axis.  Recomputed here rather than with the buffer
+     * dimensions so that a carrier-only reconfiguration (same geometry, new
+     * wavelength) still recalibrates the Doppler axis. */
+    e->axis_vel_step_mps  = e->dm.wavelength_m * e->cfg.prf_hz /
+                            (2.0 * (double)e->n_doppler);
+    e->axis_vel_first_mps = e->axis_vel_step_mps *
+                            (1.0 - 0.5 * (double)e->n_doppler);
+
+    pwr_engine_update_stc_gain(e);
 }
 
 static PWR_Status pwr_engine_alloc_buffers(PWR_Engine* e)
@@ -925,7 +942,14 @@ PWR_EXPORT(PWR_Status) pwr_engine_get_metrics(const PWR_Engine* eng,
     return PWR_STATUS_OK;
 }
 
-/* True when the two configurations imply identical buffer geometry. */
+/* True when the two configurations imply an identical processing grid, i.e.
+ * the lightweight reconfiguration path is safe.  Beyond the buffer sizes this
+ * must also cover the cached fast-time mapping (range_offset / range_decim,
+ * reached through range_start_m and the derived bin spacing): those are only
+ * recomputed on the full path, so treating them as "equal dimensions" would
+ * leave the engine decimating on the old grid while the published metrics
+ * describe the new one.  The doubles compare exactly because both sides come
+ * from the same pure derivation of otherwise identical inputs. */
 static int pwr_dims_equal(const PWR_RadarConfig* a, const PWR_RadarConfig* b)
 {
     PWR_DerivedMetrics da, db;
@@ -936,7 +960,9 @@ static int pwr_dims_equal(const PWR_RadarConfig* a, const PWR_RadarConfig* b)
             a->ppi_azimuth_cells  == b->ppi_azimuth_cells &&
             a->rti_rows           == b->rti_rows &&
             a->mti_mode           == b->mti_mode &&
+            a->range_start_m      == b->range_start_m &&
             da.range_bins         == db.range_bins &&
+            da.range_bin_spacing_m == db.range_bin_spacing_m &&
             da.samples_per_pri    == db.samples_per_pri &&
             da.fast_time_fft_size == db.fast_time_fft_size &&
             a->cfar.train_range   == b->cfar.train_range &&
@@ -1022,6 +1048,10 @@ PWR_EXPORT(PWR_Status) pwr_engine_reconfigure(PWR_Engine* eng,
     return PWR_STATUS_OK;
 }
 
+/* Boilerplate bracket for the fine-grained setters: BEGIN NULL-checks the
+ * engine and takes proc_lock; END releases it and returns PWR_STATUS_OK.
+ * Bodies wrapped in this pair therefore cannot fail - anything fallible must
+ * use explicit locking instead (see pwr_engine_set_cfar). */
 #define PWR_HOT_SETTER_BEGIN(engptr)                                          \
     if ((engptr) == NULL) { return PWR_ERR_NULL_POINTER; }                     \
     pwr_mutex_lock(&(engptr)->proc_lock)
@@ -1117,16 +1147,10 @@ PWR_EXPORT(PWR_Status) pwr_engine_set_time_scale(PWR_Engine* eng, double scale)
 PWR_EXPORT(PWR_Status) pwr_engine_set_stc(PWR_Engine* eng, int32_t enable,
                                           double range_m)
 {
-    uint32_t i;
     PWR_HOT_SETTER_BEGIN(eng);
     eng->cfg.enable_stc  = (enable != 0) ? 1 : 0;
     eng->cfg.stc_range_m = pwr_clampd(range_m, 100.0, 1.0e6);
-    for (i = 0u; i < eng->n_range; ++i)
-    {
-        const double r = eng->axis_range_first_m + (double)i * eng->axis_range_step_m;
-        double g = (r / eng->cfg.stc_range_m) * (r / eng->cfg.stc_range_m);
-        eng->stc_gain[i] = (pwr_real)pwr_clampd(g, 1.0e-3, 1.0);
-    }
+    pwr_engine_update_stc_gain(eng);
     PWR_HOT_SETTER_END(eng);
 }
 

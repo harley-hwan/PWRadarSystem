@@ -723,7 +723,7 @@ void pwr_tracker_update(struct PWR_Engine* e)
                 int blocked = 0;
 
                 if (tr->col_assign[c] >= 0) { continue; }
-                if (det->snr_db < (float)e->cfg.cluster.min_snr_db) { continue; }
+                if (det->snr_db < e->cfg.cluster.min_snr_db) { continue; }
 
                 zx = det->range_m * sin(pwr_deg_to_rad(det->azimuth_deg));
                 zy = det->range_m * cos(pwr_deg_to_rad(det->azimuth_deg));

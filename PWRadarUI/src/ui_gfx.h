@@ -12,6 +12,8 @@
  *     entry points exist for crisp one-pixel UI chrome.
  *   * Every primitive is clipped to the canvas clip rectangle, which is a
  *     stack so a widget can nest its own clip and restore it.
+ *   * The renderer and the plotting layer above it keep static scratch
+ *     buffers, so all drawing must stay on a single thread.
  *
  *  Language: ISO C17
  * ========================================================================== */
@@ -22,6 +24,11 @@
 #include <stdint.h>
 
 #include "ui_font.h"
+
+/* Shared by every drawing translation unit; ISO C has no portable M_PI. */
+#ifndef UI_PI
+#define UI_PI 3.14159265358979323846
+#endif
 
 /* --------------------------------------------------------------------------
  *  Colour

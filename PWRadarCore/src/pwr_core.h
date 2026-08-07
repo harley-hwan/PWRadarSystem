@@ -90,7 +90,7 @@ typedef struct PWR_CfarWork
 {
     uint8_t*  hit;                /* [n_doppler*n_range] 1 == above threshold */
     pwr_real* threshold;          /* [n_doppler*n_range] linear power         */
-    double*   integral;           /* [(n_doppler+1)*(n_range+1)] prefix sums  */
+    double*   integral;           /* [n_doppler*(n_range+1)] per-row prefix sums */
     pwr_real* train_scratch;      /* [max_train_cells] for OS / TM            */
     uint32_t  train_capacity;
     uint32_t  cells_tested;

@@ -59,8 +59,8 @@
 #define UI_C_SERIES_0       UI_RGB(0x4F, 0xC3, 0xF7)   /* processed video      */
 #define UI_C_SERIES_1       UI_RGB(0x9E, 0xA7, 0xB3)   /* raw video            */
 #define UI_C_SERIES_2       UI_RGB(0xFF, 0x6E, 0x5A)   /* CFAR threshold       */
-#define UI_C_SERIES_3       UI_RGB(0x8BC, 0x34, 0x0A)
-#define UI_C_SERIES_4       UI_RGB(0xB3, 0x9D, 0xDB)
+#define UI_C_SERIES_3       UI_RGB(0x8B, 0xC3, 0x4A)   /* spare (light green)  */
+#define UI_C_SERIES_4       UI_RGB(0xB3, 0x9D, 0xDB)   /* spare (lavender)     */
 
 /* ---- radar symbology --------------------------------------------------- */
 #define UI_C_DETECTION      UI_RGB(0x40, 0xE0, 0xD0)

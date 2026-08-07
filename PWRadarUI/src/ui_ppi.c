@@ -11,10 +11,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef UI_PI
-#define UI_PI 3.14159265358979323846
-#endif
-
 #define UI_PPI_OUTSIDE 0xFFFFu
 
 static double ui_max_d(double a, double b) { return (a > b) ? a : b; }

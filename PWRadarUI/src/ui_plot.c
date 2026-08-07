@@ -10,10 +10,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#ifndef UI_PI
-#define UI_PI 3.14159265358979323846
-#endif
-
 #define UI_PLOT_MAX_PTS 8192
 
 /* ==========================================================================
@@ -162,7 +158,6 @@ void ui_axes_layout(UI_Axes* a, UI_Rect frame)
 {
     const int32_t tick_h = ui_font_line_height(UI_FONT_SMALL);
     int32_t left, right, top, bottom, wmax, i;
-    char buf[24];
 
     a->frame = frame;
 
@@ -180,7 +175,6 @@ void ui_axes_layout(UI_Axes* a, UI_Rect frame)
         const int32_t w = ui_text_width(UI_FONT_SMALL, a->yt.text[i]);
         if (w > wmax) { wmax = w; }
     }
-    (void)buf;
 
     left   = wmax + 10;
     right  = 8;

@@ -590,9 +590,9 @@ void pwr_cluster_run(struct PWR_Engine* e)
                                        cen_d * e->axis_vel_step_mps;
             det->azimuth_deg  = pwr_wrap360(e->beam_azimuth_deg);
             det->time_s       = e->scenario_time_s;
-            det->amplitude_db = (float)peak_db;
-            det->snr_db       = (float)snr_db;
-            det->threshold_db = (float)pwr_pow_to_db(
+            det->amplitude_db = peak_db;
+            det->snr_db       = snr_db;
+            det->threshold_db = (double)pwr_pow_to_db(
                 e->cfar.threshold[(size_t)acc.peak_j * nr + acc.peak_r]);
             det->ambiguous = (det->range_m > e->dm.unambiguous_range_m ||
                               fabs(det->radial_velocity_mps) >

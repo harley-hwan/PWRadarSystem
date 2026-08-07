@@ -485,12 +485,16 @@ int ui_slider(UI_Context* c, uint32_t id, UI_Rect r, const char* label,
 int ui_slider_int(UI_Context* c, uint32_t id, UI_Rect r, const char* label,
                   int32_t* v, int32_t lo, int32_t hi, const char* fmt)
 {
+    /* Reports a change only when the *rounded* value moves, so a drag that
+     * stays within one integer step never spams the caller's reconfigure
+     * path even though the underlying slider changed every frame. */
     double d = (double)*v;
-    const int ch = ui_slider(c, id, r, label, &d, (double)lo, (double)hi,
-                             (fmt != NULL) ? fmt : "%.0f", 0);
-    const int32_t nv = (int32_t)floor(d + 0.5);
+    int32_t nv;
+    (void)ui_slider(c, id, r, label, &d, (double)lo, (double)hi,
+                    (fmt != NULL) ? fmt : "%.0f", 0);
+    nv = (int32_t)floor(d + 0.5);
     if (nv != *v) { *v = nv; return 1; }
-    return (ch != 0) ? 0 : 0;
+    return 0;
 }
 
 /* ==========================================================================

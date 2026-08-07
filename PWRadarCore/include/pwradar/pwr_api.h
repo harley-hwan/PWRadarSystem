@@ -80,7 +80,7 @@ PWR_EXPORT(const char*) pwr_track_state_name(PWR_TrackState s);
  *  2.  Configuration helpers (pure functions, no engine required)
  * ========================================================================== */
 
-/** Fills @p cfg with a validated, self-consistent X-band maritime/air
+/** Fills @p cfg with a validated, self-consistent S-band maritime/air
  *  surveillance configuration.  Always succeeds for a non-NULL pointer. */
 PWR_EXPORT(PWR_Status) pwr_config_default(PWR_RadarConfig* cfg);
 
