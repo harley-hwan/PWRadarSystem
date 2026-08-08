@@ -81,15 +81,22 @@ typedef struct UI_Context
 
     /* ---- deferred drop-down --------------------------------------------- */
     uint32_t  popup_id;
-    UI_Rect   popup_anchor;
+    /* Owner of the popup on the frame it closed.  A selection lands on the
+     * close frame, after popup_id is already cleared, so the owning combo is
+     * remembered by identity - never by geometry, which would confuse two
+     * widgets that happen to share a position. */
+    uint32_t  popup_closed;
     UI_Rect   popup_rect;
     int32_t   popup_count;
+    /* The live selection is stored HERE, never behind a caller pointer: the
+     * `sel` a combo passes usually points at panel stack that is only valid
+     * within the frame that passed it, so the popup keeps the value and the
+     * combo commits it through the current frame's fresh pointer. */
     int32_t   popup_sel;
     int32_t   popup_hover;
     int32_t   popup_scroll;
     UI_ItemFn popup_items;
     void*     popup_user;
-    int32_t*  popup_target;
     int       popup_changed;
 
     /* ---- timing --------------------------------------------------------- */

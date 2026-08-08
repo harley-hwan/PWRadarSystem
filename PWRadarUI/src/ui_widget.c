@@ -124,6 +124,7 @@ void ui_frame_begin(UI_Context* c, uint32_t* px, int32_t w, int32_t h,
     c->cursor         = UI_CURSOR_ARROW;
     c->mouse_captured = 0;
     c->popup_changed  = 0;
+    c->popup_closed   = 0u;
 
     /* The drop-down is modal: it consumes the pointer before any widget can
      * claim it, using the geometry it was drawn with last frame. */
@@ -699,9 +700,9 @@ static void ui_popup_input(UI_Context* c)
         if (row >= 0 && row < c->popup_count) { c->popup_hover = row; }
         if (c->pressed[UI_MB_LEFT] != 0 && c->popup_hover >= 0)
         {
-            if (c->popup_target != NULL && *c->popup_target != c->popup_hover)
+            if (c->popup_sel != c->popup_hover)
             {
-                *c->popup_target = c->popup_hover;
+                c->popup_sel     = c->popup_hover;
                 c->popup_changed = 1;
             }
             close = 1;
@@ -713,22 +714,26 @@ static void ui_popup_input(UI_Context* c)
     }
 
     if (ui_key_pressed(c, UI_KEY_ESCAPE)) { close = 1; }
-    if (ui_key_pressed(c, UI_KEY_ENTER) && c->popup_hover >= 0)
+    /* Enter confirms and closes.  It reports a change only when the hovered
+     * row differs from the selection, so confirming the current value stays
+     * a no-op for the caller (no spurious scenario reload, for instance). */
+    if (ui_key_pressed(c, UI_KEY_ENTER))
     {
-        if (c->popup_target != NULL) { *c->popup_target = c->popup_hover; }
-        c->popup_changed = 1;
+        if (c->popup_hover >= 0 && c->popup_sel != c->popup_hover)
+        {
+            c->popup_sel     = c->popup_hover;
+            c->popup_changed = 1;
+        }
         close = 1;
     }
-    if (ui_key_pressed(c, UI_KEY_DOWN) && c->popup_target != NULL &&
-        *c->popup_target + 1 < c->popup_count)
+    if (ui_key_pressed(c, UI_KEY_DOWN) && c->popup_sel + 1 < c->popup_count)
     {
-        ++(*c->popup_target);
+        ++c->popup_sel;
         c->popup_changed = 1;
     }
-    if (ui_key_pressed(c, UI_KEY_UP) && c->popup_target != NULL &&
-        *c->popup_target > 0)
+    if (ui_key_pressed(c, UI_KEY_UP) && c->popup_sel > 0)
     {
-        --(*c->popup_target);
+        --c->popup_sel;
         c->popup_changed = 1;
     }
 
@@ -739,8 +744,8 @@ static void ui_popup_input(UI_Context* c)
 
     if (close != 0)
     {
+        c->popup_closed = c->popup_id;
         c->popup_id     = 0u;
-        c->popup_target = NULL;
         c->popup_items  = NULL;
     }
 }
@@ -774,7 +779,7 @@ static void ui_popup_draw(UI_Context* c)
         {
             ui_fill_rect(&c->canvas, row, UI_C_SELECTION);
         }
-        else if (c->popup_target != NULL && i == *c->popup_target)
+        else if (i == c->popup_sel)
         {
             ui_fill_rect(&c->canvas, row, UI_C_PANEL_LO);
         }
@@ -782,7 +787,7 @@ static void ui_popup_draw(UI_Context* c)
         (void)ui_text_in_rect(&c->canvas, UI_FONT_BODY, row, UI_M_PAD,
                               UI_C_TEXT, UI_ALIGN_LEFT,
                               (txt != NULL) ? txt : "");
-        if (c->popup_target != NULL && i == *c->popup_target)
+        if (i == c->popup_sel)
         {
             (void)ui_text_in_rect(&c->canvas, UI_FONT_BODY, row, UI_M_PAD,
                                   UI_C_FOCUS, UI_ALIGN_RIGHT, "\xE2\x97\x8F");
@@ -817,22 +822,24 @@ int ui_combo(UI_Context* c, uint32_t id, UI_Rect r, const char* label,
             if (y < 4) { y = 4; }
         }
         c->popup_id     = id;
-        c->popup_anchor = box;
         c->popup_rect   = ui_rect(box.x, y, box.w, maxh);
         c->popup_count  = count;
         c->popup_items  = items;
         c->popup_user   = user;
-        c->popup_target = sel;
+        c->popup_sel    = *sel;
         c->popup_hover  = *sel;
         c->popup_scroll = 0;
         if (*sel * rh > maxh - rh) { c->popup_scroll = *sel * rh - maxh / 2; }
         if (c->popup_scroll < 0) { c->popup_scroll = 0; }
     }
-    if (c->popup_changed != 0 && c->popup_target == sel) { changed = 1; }
-    /* popup_target is cleared on close, so also accept the frame it closed on. */
-    if (c->popup_changed != 0 && c->popup_id == 0u && c->popup_anchor.x == box.x &&
-        c->popup_anchor.y == box.y)
+    /* Commit through THIS frame's pointer, both while the popup is open
+     * (arrow keys) and on the frame it closed; the `sel` captured when the
+     * popup opened pointed at panel stack that died with that frame. */
+    if (c->popup_changed != 0 &&
+        (c->popup_id == id || c->popup_closed == id) &&
+        c->popup_sel >= 0 && c->popup_sel < count && *sel != c->popup_sel)
     {
+        *sel = c->popup_sel;
         changed = 1;
     }
 

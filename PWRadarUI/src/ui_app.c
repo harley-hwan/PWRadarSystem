@@ -935,13 +935,25 @@ static void app_panel_detect(App* a, UI_Rect r)
                                                                    : UI_C_OK);
 
         /* Pfa per cell is what the detector is designed to; false plots per
-         * scan is what the operator actually sees, so show both. */
+         * scan is what the operator actually sees, so show both.  Only cells
+         * that receive a detection test can raise a false plot: the
+         * zero-Doppler censor removes 2*guard+1 rows (clamped to the map)
+         * from every CPI, the same convention the achieved-Pfa denominator
+         * uses. */
         row = ui_stack_row(&s, 17);
         {
-            const double cells_per_cpi = (double)a->dm.range_bins *
-                                         (double)a->dm.doppler_bins;
-            const double cpi_per_scan = (a->dm.cpi_duration_s > 0.0 &&
-                                         a->dm.scan_period_s > 0.0)
+            double dop_tested = (double)a->dm.doppler_bins;
+            double cells_per_cpi, cpi_per_scan;
+            if (a->cfg.cfar.censor_zero_doppler != 0)
+            {
+                const double censored =
+                    2.0 * (double)a->cfg.cfar.zero_doppler_guard + 1.0;
+                dop_tested = (censored < dop_tested) ? (dop_tested - censored)
+                                                     : 0.0;
+            }
+            cells_per_cpi = (double)a->dm.range_bins * dop_tested;
+            cpi_per_scan = (a->dm.cpi_duration_s > 0.0 &&
+                            a->dm.scan_period_s > 0.0)
                 ? (a->dm.scan_period_s / a->dm.cpi_duration_s) : 1.0;
             (void)snprintf(buf, sizeof(buf), "%.2f",
                            a->cfg.cfar.pfa * cells_per_cpi * cpi_per_scan);

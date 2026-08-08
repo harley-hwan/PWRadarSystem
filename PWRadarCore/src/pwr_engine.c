@@ -530,7 +530,10 @@ void pwr_frame_publish(struct PWR_Engine* e)
 
     pwr_mutex_lock(&e->frame_lock);
     e->publish_index = slot;
-    ++e->stats.frames_published;
+    /* Atomic store, not a plain increment: pwr_engine_frame_sequence() reads
+     * this counter from the consumer thread without taking frame_lock. */
+    pwr_atomic_store_u64(&e->stats.frames_published,
+                         e->stats.frames_published + 1u);
     pwr_mutex_unlock(&e->frame_lock);
 }
 

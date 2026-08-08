@@ -322,11 +322,17 @@ void pwr_cfar_run(struct PWR_Engine* e)
 
                 threshold = noise_est * alpha * bias;
                 thr[r]    = (pwr_real)threshold;
-                ++e->cfar.cells_tested;
-                if (censor == 0 && (double)row[r] > threshold)
+                /* A censored cell receives no detection test, so it must not
+                 * enter the measured-Pfa denominator either - counting it
+                 * would bias stats.measured_pfa low by the censored fraction. */
+                if (censor == 0)
                 {
-                    hit[r] = 1u;
-                    ++e->cfar.cells_hit;
+                    ++e->cfar.cells_tested;
+                    if ((double)row[r] > threshold)
+                    {
+                        hit[r] = 1u;
+                        ++e->cfar.cells_hit;
+                    }
                 }
             }
             break;
@@ -357,11 +363,14 @@ void pwr_cfar_run(struct PWR_Engine* e)
                 alpha     = pwr_alpha_os(cnt, k, cf->pfa);
                 threshold = noise_est * alpha * bias;
                 thr[r]    = (pwr_real)threshold;
-                ++e->cfar.cells_tested;
-                if (censor == 0 && (double)row[r] > threshold)
+                if (censor == 0)
                 {
-                    hit[r] = 1u;
-                    ++e->cfar.cells_hit;
+                    ++e->cfar.cells_tested;
+                    if ((double)row[r] > threshold)
+                    {
+                        hit[r] = 1u;
+                        ++e->cfar.cells_hit;
+                    }
                 }
             }
             break;
@@ -395,11 +404,14 @@ void pwr_cfar_run(struct PWR_Engine* e)
                 alpha     = pwr_alpha_cached(&ac, used);
                 threshold = noise_est * alpha * bias;
                 thr[r]    = (pwr_real)threshold;
-                ++e->cfar.cells_tested;
-                if (censor == 0 && (double)row[r] > threshold)
+                if (censor == 0)
                 {
-                    hit[r] = 1u;
-                    ++e->cfar.cells_hit;
+                    ++e->cfar.cells_tested;
+                    if ((double)row[r] > threshold)
+                    {
+                        hit[r] = 1u;
+                        ++e->cfar.cells_hit;
+                    }
                 }
             }
             break;
