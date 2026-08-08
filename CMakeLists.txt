@@ -68,11 +68,13 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 # ----------------------------------------------------------------------------
 #  Warning policy
 #  --------------------------------------------------------------------------
-#  The GCC/Clang side is verified warning-clean at the level below.  MSVC /W4
-#  diagnoses a partly different set and has not been verified here, so
-#  warnings-as-errors is opt-in rather than on by default: a first build should
-#  fail on a defect, not on a diagnostic nobody has looked at yet.
-#      cmake --build build --config Release -- /p:PWRadarWerror=ON
+#  Both toolchains are verified warning-clean at the levels below: GCC/Clang
+#  at the -Wall/-Wextra set, and MSVC 19.44 (VS 2022 v143, x64) at /W4 across
+#  all 25 translation units in both Debug and Release, including a full /WX
+#  build via -DPWR_WERROR=ON (verified 2026-08-08, self test 9/9 unchanged).
+#  Warnings-as-errors stays opt-in by policy: a future compiler version may
+#  introduce new diagnostics, and a first build should fail on a defect, not
+#  on a diagnostic nobody has read yet.
 #      cmake -S . -B build -DPWR_WERROR=ON
 # ----------------------------------------------------------------------------
 option(PWR_WERROR "Treat compiler warnings as errors" OFF)

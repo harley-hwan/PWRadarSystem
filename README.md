@@ -84,9 +84,12 @@ GCC/Clang 쪽은 다음 수준에서 **경고 0개**로 검증되었습니다:
 -Wmissing-prototypes -Wcast-qual -Wpointer-arith -Wwrite-strings
 ```
 
-MSVC `/W4`는 진단 항목이 일부 다르고 이 환경에서 검증할 수 없었기 때문에
-**경고를 에러로 취급하는 옵션은 기본 해제**입니다. 트리가 깨끗한 것을
-확인하신 뒤 켜세요:
+MSVC `/W4`도 검증되었습니다: 실제 Windows 11에서 MSVC 19.44(VS 2022 v143,
+x64)로 Release·Debug 전 구성의 25개 번역 단위가 **경고 0개**이고,
+`-DPWR_WERROR=ON`(/WX) 빌드도 두 구성 모두 통과합니다(2026-08-08, selftest
+9/9 기준선 일치). 그래도 **경고를 에러로 취급하는 옵션은 기본 해제**를
+유지합니다 — 새 컴파일러 버전이 추가하는 진단이 첫 빌드를 깨뜨리지 않게
+하기 위한 정책입니다. 켜려면:
 
 ```sh
 cmake -S . -B build -DPWR_WERROR=ON
@@ -115,9 +118,11 @@ sudo apt install mingw-w64
 
 검증 상태: Windows 경로는 컴파일·링크(무경고) → `--selftest` 9/9 → Xvfb 위에서
 GUI 40프레임 렌더까지 wine으로 **실행 확인** 완료. Linux 경로는 컴파일·링크·
-실행·수치 검증 9/9·CTest·렌더링 확인 완료. 남은 미확인 영역은 **MSVC 고유
-진단**과 **실제 Windows 커널에서의 실행**뿐입니다(wine은 Windows가 아니고
-mingw는 MSVC가 아닙니다).
+실행·수치 검증 9/9·CTest·렌더링 확인 완료. 한때 남아 있던 미확인 영역 —
+**MSVC 고유 진단**과 **실제 Windows 커널에서의 실행** — 도 닫혔습니다: 실제
+Windows 11에서 MSVC 19.44(VS 2022)로 Release·Debug 전 구성 `/W4` 무경고,
+`-DPWR_WERROR=ON`(/WX) 빌드 통과, `--selftest` 9/9 실행까지 확인했습니다
+(2026-08-08).
 
 ### 1.1 `PWR_OK` 를 쓰지 않는 이유 (실제로 겪은 버그)
 
