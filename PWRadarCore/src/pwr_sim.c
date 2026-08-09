@@ -299,12 +299,17 @@ void pwr_sim_generate_cpi(struct PWR_Engine* e)
                      pwr_clampd(s->env.jammer_bandwidth_frac, 0.0, 1.0);
     }
 
+    /* Receiver output beyond the compression copy window can never reach a
+     * displayed range bin (the compressor does not even read it), so noise
+     * and echoes are only synthesised up to fast_copy.  The tail of each
+     * row stays zero from allocation. */
     if (noise_var > 0.0)
     {
+        const uint32_t n_gen = e->fast_copy;
         for (p = 0u; p < n_pulses; ++p)
         {
             PWR_Complex* row = &e->rx[(size_t)p * n_samples];
-            for (i = 0u; i < n_samples; ++i)
+            for (i = 0u; i < n_gen; ++i)
             {
                 row[i] = pwr_rng_cgauss(&s->rng, noise_var);
             }
@@ -403,9 +408,11 @@ void pwr_sim_generate_cpi(struct PWR_Engine* e)
 
             n_lo = (int32_t)ceil(tau);
             n_hi = (int32_t)floor(tau + (double)(n_tx - 1u));
-            if (n_hi < 0 || n_lo >= (int32_t)n_samples) { continue; }
+            /* Clamp echo taps to the compression copy window; anything
+             * further out is never read by the chain. */
+            if (n_hi < 0 || n_lo >= (int32_t)e->fast_copy) { continue; }
             if (n_lo < 0) { n_lo = 0; }
-            if (n_hi > (int32_t)n_samples - 1) { n_hi = (int32_t)n_samples - 1; }
+            if (n_hi > (int32_t)e->fast_copy - 1) { n_hi = (int32_t)e->fast_copy - 1; }
 
             for (n_i = n_lo; n_i <= n_hi; ++n_i)
             {

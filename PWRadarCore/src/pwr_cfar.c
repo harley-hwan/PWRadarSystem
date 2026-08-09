@@ -96,9 +96,12 @@ PWR_Status pwr_cfar_alloc(PWR_CfarWork* w, uint32_t n_doppler, uint32_t n_range,
     w->hit           = PWR_ALLOC_ARRAY(uint8_t,  (size_t)n_doppler * n_range);
     w->threshold     = PWR_ALLOC_ARRAY(pwr_real, (size_t)n_doppler * n_range);
     w->integral      = PWR_ALLOC_ARRAY(double,   (size_t)n_doppler * (n_range + 1u));
+    w->win_psum      = PWR_ALLOC_ARRAY(double,   (size_t)n_range + 1u);
+    w->gband_psum    = PWR_ALLOC_ARRAY(double,   (size_t)n_range + 1u);
     w->train_scratch = PWR_ALLOC_ARRAY(pwr_real, train_cap);
-    if (w->hit == NULL || w->threshold == NULL ||
-        w->integral == NULL || w->train_scratch == NULL)
+    if (w->hit == NULL || w->threshold == NULL || w->integral == NULL ||
+        w->win_psum == NULL || w->gband_psum == NULL ||
+        w->train_scratch == NULL)
     {
         pwr_cfar_release(w);
         return PWR_ERR_OUT_OF_MEMORY;
@@ -113,6 +116,8 @@ void pwr_cfar_release(PWR_CfarWork* w)
     PWR_FREE(w->hit);
     PWR_FREE(w->threshold);
     PWR_FREE(w->integral);
+    PWR_FREE(w->win_psum);
+    PWR_FREE(w->gband_psum);
     PWR_FREE(w->train_scratch);
     w->train_capacity = 0u;
     w->cells_tested   = 0u;
@@ -206,7 +211,11 @@ void pwr_cfar_run(struct PWR_Engine* e)
     const double   bias = pwr_db_to_pow(cf->extra_threshold_db);
     const int32_t  zero_row = (int32_t)nd / 2 - 1;
     double* const  psum = e->cfar.integral;
-    int32_t        rows[2 * PWR_CFAR_MAX_HD + 1];  /* wrapped Doppler rows     */
+    double* const  wsum = e->cfar.win_psum;
+    double* const  gsum = e->cfar.gband_psum;
+    const int      ca_family = (cf->type == PWR_CFAR_CA ||
+                                cf->type == PWR_CFAR_GOCA ||
+                                cf->type == PWR_CFAR_SOCA) ? 1 : 0;
     PWR_AlphaCache ac;
     uint32_t j, r;
 
@@ -240,13 +249,53 @@ void pwr_cfar_run(struct PWR_Engine* e)
         const int32_t censor = (cf->censor_zero_doppler != 0 &&
                                 labs((long)((int32_t)j - zero_row)) <=
                                     (long)cf->zero_doppler_guard) ? 1 : 0;
-        const int32_t n_rows = 2 * Hd + 1;
-        int32_t dj;
 
-        for (dj = -Hd; dj <= Hd; ++dj)
+        /* Advance the sliding window sums.  Adding and subtracting whole
+         * prefix rows costs O(nr) per Doppler row where the old per-cell row
+         * walk cost O(Hd) per cell; the double-precision drift across nd
+         * incremental slides is a few ulp, far below anything a statistical
+         * threshold can feel. */
+        if (ca_family != 0)
         {
-            rows[dj + Hd] = (((int32_t)j + dj) % (int32_t)nd +
-                             (int32_t)nd) % (int32_t)nd;
+            uint32_t rr;
+            if (j == 0u)
+            {
+                int32_t dj;
+                memset(wsum, 0, (size_t)(nr + 1u) * sizeof(double));
+                memset(gsum, 0, (size_t)(nr + 1u) * sizeof(double));
+                for (dj = -Hd; dj <= Hd; ++dj)
+                {
+                    const int32_t jj = ((dj % (int32_t)nd) + (int32_t)nd) %
+                                       (int32_t)nd;
+                    const double* PWR_RESTRICT ps = &psum[(size_t)jj * (nr + 1u)];
+                    const int in_g = (dj >= -Gd && dj <= Gd) ? 1 : 0;
+                    for (rr = 0u; rr <= nr; ++rr)
+                    {
+                        wsum[rr] += ps[rr];
+                        if (in_g != 0) { gsum[rr] += ps[rr]; }
+                    }
+                }
+            }
+            else
+            {
+                const int32_t aw = (((int32_t)j + Hd) % (int32_t)nd +
+                                    (int32_t)nd) % (int32_t)nd;
+                const int32_t sw = (((int32_t)j - 1 - Hd) % (int32_t)nd +
+                                    (int32_t)nd) % (int32_t)nd;
+                const int32_t ag = (((int32_t)j + Gd) % (int32_t)nd +
+                                    (int32_t)nd) % (int32_t)nd;
+                const int32_t sg = (((int32_t)j - 1 - Gd) % (int32_t)nd +
+                                    (int32_t)nd) % (int32_t)nd;
+                const double* PWR_RESTRICT paw = &psum[(size_t)aw * (nr + 1u)];
+                const double* PWR_RESTRICT psw = &psum[(size_t)sw * (nr + 1u)];
+                const double* PWR_RESTRICT pag = &psum[(size_t)ag * (nr + 1u)];
+                const double* PWR_RESTRICT psg = &psum[(size_t)sg * (nr + 1u)];
+                for (rr = 0u; rr <= nr; ++rr)
+                {
+                    wsum[rr] += paw[rr] - psw[rr];
+                    gsum[rr] += pag[rr] - psg[rr];
+                }
+            }
         }
 
         switch (cf->type)
@@ -255,6 +304,9 @@ void pwr_cfar_run(struct PWR_Engine* e)
         case PWR_CFAR_CA:
         case PWR_CFAR_GOCA:
         case PWR_CFAR_SOCA:
+        {
+            const int32_t n_rows = 2 * Hd + 1;
+            const int32_t n_mid  = n_rows - (2 * Gd + 1);
             for (r = 0u; r < nr; ++r)
             {
                 const int32_t r_lo = pwr_maxi(0, (int32_t)r - Hr);
@@ -264,35 +316,32 @@ void pwr_cfar_run(struct PWR_Engine* e)
                 double sum_lead = 0.0, sum_lag = 0.0;
                 uint32_t n_lead = 0u, n_lag = 0u, n_ref;
                 double noise_est, alpha, threshold;
-                int32_t k;
 
-                for (k = 0; k < n_rows; ++k)
+                /* Same arithmetic as the old per-row walk, regrouped through
+                 * the combined window rows: the lead/lag spans are identical
+                 * for every window row, and the guard-band middle span is the
+                 * window sum minus the guard-band sum, halved exactly as the
+                 * per-row 0.5 splits summed to.  The integer counts replicate
+                 * the per-row floor division bit for bit. */
+                if (g_lo > r_lo)
                 {
-                    const double* ps = &psum[(size_t)rows[k] * (nr + 1u)];
-                    const int inside_guard_d = ((k - Hd) >= -Gd && (k - Hd) <= Gd);
-
-                    if (g_lo > r_lo)
-                    {
-                        sum_lag += ps[g_lo] - ps[r_lo];
-                        n_lag   += (uint32_t)(g_lo - r_lo);
-                    }
-                    if (r_hi > g_hi)
-                    {
-                        sum_lead += ps[r_hi + 1] - ps[g_hi + 1];
-                        n_lead   += (uint32_t)(r_hi - g_hi);
-                    }
-                    /* Rows outside the Doppler guard band also contribute the
-                     * span the two halves above skip; split it evenly so the
-                     * GO/SO comparison stays balanced. */
-                    if (!inside_guard_d && g_hi >= g_lo)
-                    {
-                        const double sp = ps[g_hi + 1] - ps[g_lo];
-                        const uint32_t cc = (uint32_t)(g_hi - g_lo + 1);
-                        sum_lag  += 0.5 * sp;
-                        sum_lead += 0.5 * sp;
-                        n_lag    += cc / 2u;
-                        n_lead   += cc - cc / 2u;
-                    }
+                    sum_lag = wsum[g_lo] - wsum[r_lo];
+                    n_lag   = (uint32_t)n_rows * (uint32_t)(g_lo - r_lo);
+                }
+                if (r_hi > g_hi)
+                {
+                    sum_lead = wsum[r_hi + 1] - wsum[g_hi + 1];
+                    n_lead   = (uint32_t)n_rows * (uint32_t)(r_hi - g_hi);
+                }
+                if (n_mid > 0 && g_hi >= g_lo)
+                {
+                    const double sp = (wsum[g_hi + 1] - wsum[g_lo]) -
+                                      (gsum[g_hi + 1] - gsum[g_lo]);
+                    const uint32_t cc = (uint32_t)(g_hi - g_lo + 1);
+                    sum_lag  += 0.5 * sp;
+                    sum_lead += 0.5 * sp;
+                    n_lag    += (uint32_t)n_mid * (cc / 2u);
+                    n_lead   += (uint32_t)n_mid * (cc - cc / 2u);
                 }
 
                 if (cf->type == PWR_CFAR_CA)
@@ -335,6 +384,7 @@ void pwr_cfar_run(struct PWR_Engine* e)
                     }
                 }
             }
+        }
             break;
 
         /* ---------------- ordered statistic ------------------------------ */
@@ -423,17 +473,12 @@ void pwr_cfar_run(struct PWR_Engine* e)
     /* ---- threshold trace that accompanies the A-scope ------------------- */
     for (r = 0u; r < nr; ++r)
     {
-        /* Report the threshold in the Doppler bin where the profile peaked,
-         * which is the cell the A-scope is actually showing. */
-        uint32_t best_j = 0u;
-        pwr_real best = -1.0f;
-        for (j = 0u; j < nd; ++j)
-        {
-            const pwr_real v = e->rd_pow[(size_t)j * nr + r];
-            if (v > best) { best = v; best_j = j; }
-        }
-        e->thresh_prof[r] =
-            pwr_pow_to_db(e->cfar.threshold[(size_t)best_j * nr + r]);
+        /* Report the threshold in the Doppler bin where the profile peaked -
+         * the cell the A-scope is actually showing.  pwr_chain_products()
+         * recorded that argmax while it built the profile, so no rescan of
+         * the map is needed here. */
+        e->thresh_prof[r] = pwr_pow_to_db(
+            e->cfar.threshold[(size_t)e->profile_peak_j[r] * nr + r]);
     }
 }
 

@@ -91,6 +91,12 @@ typedef struct PWR_CfarWork
     uint8_t*  hit;                /* [n_doppler*n_range] 1 == above threshold */
     pwr_real* threshold;          /* [n_doppler*n_range] linear power         */
     double*   integral;           /* [n_doppler*(n_range+1)] per-row prefix sums */
+    /* Sliding Doppler-window sums for the CA family: win_psum is the prefix
+     * row summed over all 2*Hd+1 window rows, gband_psum the same over the
+     * 2*Gd+1 guard-band rows.  Maintained incrementally as the cell-under-
+     * test row advances, making the reference sum O(1) per cell. */
+    double*   win_psum;           /* [n_range+1]                              */
+    double*   gband_psum;         /* [n_range+1]                              */
     pwr_real* train_scratch;      /* [max_train_cells] for OS / TM            */
     uint32_t  train_capacity;
     uint32_t  cells_tested;
@@ -227,6 +233,11 @@ struct PWR_Engine
     uint32_t            n_fast_fft;
     uint32_t            range_offset;   /* first processed fast-time sample    */
     uint32_t            range_decim;    /* fast-time decimation into bins      */
+    /* Fast-time samples per pulse that can reach a displayed bin (gate window
+     * plus one pulse).  The simulator synthesises receiver output and the
+     * compressor copies input only up to here; the FFT's remaining bins are
+     * zero padding that absorbs the circular wrap. */
+    uint32_t            fast_copy;
     uint32_t            ppi_cells;
     uint32_t            rti_rows;
 
@@ -266,6 +277,9 @@ struct PWR_Engine
     pwr_real*           rd_pow;     /* [n_doppler * n_range] linear power     */
     pwr_real*           rd_db;      /* [n_doppler * n_range] dB               */
     pwr_real*           profile_pow;/* [n_range] max over doppler             */
+    uint32_t*           profile_peak_j; /* [n_range] argmax Doppler row of the
+                                     * profile, recorded by products so the
+                                     * CFAR threshold trace needs no rescan  */
     pwr_real*           profile_raw;/* [n_range] pre-MTI incoherent sum       */
     pwr_real*           thresh_prof;/* [n_range] threshold at profile peak    */
     pwr_real*           stc_gain;   /* [n_range] sensitivity time control     */
@@ -305,6 +319,9 @@ struct PWR_Engine
     double              beam_azimuth_deg;
     double              last_scan_wrap_deg;
     uint32_t            cursor_range_bin;
+    /* CPIs since the PPI afterglow decay was last applied; the full-grid
+     * decay pass is batched (see pwr_display_update_ppi). */
+    uint32_t            ppi_decay_pending;
 
     /* ---- published frames ----------------------------------------------- */
     PWR_FrameStore      frames[PWR_FRAME_SLOTS];

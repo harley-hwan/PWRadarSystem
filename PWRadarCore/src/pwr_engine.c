@@ -153,6 +153,7 @@ static void pwr_engine_free_buffers(PWR_Engine* e)
     PWR_FREE(e->rd_pow);
     PWR_FREE(e->rd_db);
     PWR_FREE(e->profile_pow);
+    PWR_FREE(e->profile_peak_j);
     PWR_FREE(e->profile_raw);
     PWR_FREE(e->thresh_prof);
     PWR_FREE(e->stc_gain);
@@ -168,6 +169,21 @@ static void pwr_engine_free_buffers(PWR_Engine* e)
     pwr_cfar_release(&e->cfar);
     pwr_sim_release(&e->sim);
     pwr_frames_release(e);
+}
+
+/* Copy width matching the gated fast-time FFT chosen by pwr_config_derive():
+ * every sample that can land in a displayed bin plus one pulse of echo tail,
+ * clamped so at least one pulse length of zero padding always survives inside
+ * the transform.  Recomputed wherever the pulse length can change - the full
+ * allocation path and the lightweight waveform rebuild. */
+static void pwr_engine_update_fast_copy(PWR_Engine* e)
+{
+    uint32_t n_tx = (uint32_t)(e->cfg.pulse_width_s * e->cfg.sample_rate_hz + 0.5);
+    uint32_t need;
+    if (n_tx < 2u) { n_tx = 2u; }
+    need = e->range_offset + (e->n_range - 1u) * e->range_decim + 1u + n_tx;
+    e->fast_copy = pwr_minu(pwr_minu(need, e->n_samples),
+                            e->n_fast_fft - n_tx);
 }
 
 /* Computes every cached dimension and the dB calibration constants. */
@@ -188,6 +204,12 @@ static void pwr_engine_compute_dims(PWR_Engine* e)
     e->range_decim  = (uint32_t)(e->dm.range_bin_spacing_m / bin_raw + 0.5);
     if (e->range_decim < 1u) { e->range_decim = 1u; }
     e->range_offset = (uint32_t)(cfg->range_start_m / bin_raw + 0.5);
+    /* A start gate beyond the PRI would index past the receive window even
+     * after the bin count collapses to one; pin the offset inside. */
+    if (e->range_offset >= e->n_samples)
+    {
+        e->range_offset = e->n_samples - 1u;
+    }
     /* Guarantee the last accessed sample stays inside the receive window. */
     while (e->n_range > 1u &&
            e->range_offset + (e->n_range - 1u) * e->range_decim >= e->n_samples)
@@ -195,6 +217,8 @@ static void pwr_engine_compute_dims(PWR_Engine* e)
         --e->n_range;
     }
     e->dm.range_bins = e->n_range;
+
+    pwr_engine_update_fast_copy(e);
 
     switch (cfg->mti_mode)
     {
@@ -302,6 +326,7 @@ static PWR_Status pwr_engine_alloc_buffers(PWR_Engine* e)
     e->rd_pow       = PWR_ALLOC_ARRAY(pwr_real,    (size_t)e->n_doppler * e->n_range);
     e->rd_db        = PWR_ALLOC_ARRAY(pwr_real,    (size_t)e->n_doppler * e->n_range);
     e->profile_pow  = PWR_ALLOC_ARRAY(pwr_real,    e->n_range);
+    e->profile_peak_j = PWR_ALLOC_ARRAY(uint32_t,  e->n_range);
     e->profile_raw  = PWR_ALLOC_ARRAY(pwr_real,    e->n_range);
     e->thresh_prof  = PWR_ALLOC_ARRAY(pwr_real,    e->n_range);
     e->stc_gain     = PWR_ALLOC_ARRAY(pwr_real,    e->n_range);
@@ -313,7 +338,8 @@ static PWR_Status pwr_engine_alloc_buffers(PWR_Engine* e)
 
     if (e->rx == NULL || e->pc == NULL || e->slow == NULL ||
         e->fast_scratch == NULL || e->rd_pow == NULL || e->rd_db == NULL ||
-        e->profile_pow == NULL || e->profile_raw == NULL ||
+        e->profile_pow == NULL || e->profile_peak_j == NULL ||
+        e->profile_raw == NULL ||
         e->thresh_prof == NULL || e->stc_gain == NULL ||
         e->ppi_accum == NULL || e->rti == NULL ||
         e->cluster_label == NULL || e->cluster_stack == NULL ||
@@ -1008,6 +1034,7 @@ PWR_EXPORT(PWR_Status) pwr_engine_reset(PWR_Engine* eng)
     eng->scenario_time_s = 0.0;
     eng->beam_azimuth_deg = 0.0;
     eng->rti_head = 0u;
+    eng->ppi_decay_pending = 0u;
     eng->detection_count = 0u;
     memset(eng->dwell, 0, sizeof(eng->dwell));
     eng->last_cpi_wall_s = 0.0;
@@ -1089,6 +1116,12 @@ static int pwr_dims_equal(const PWR_RadarConfig* a, const PWR_RadarConfig* b)
             a->rti_rows           == b->rti_rows &&
             a->mti_mode           == b->mti_mode &&
             a->range_start_m      == b->range_start_m &&
+            /* The sample rate is compared directly, not through its derived
+             * proxies: a co-scaled sample-rate + PRF change can leave
+             * samples_per_pri, the bin spacing and the gated FFT size all
+             * bit-identical while the sample-domain offset and decimation -
+             * which only the full path recomputes - both change. */
+            a->sample_rate_hz     == b->sample_rate_hz &&
             da.range_bins         == db.range_bins &&
             da.range_bin_spacing_m == db.range_bin_spacing_m &&
             da.samples_per_pri    == db.samples_per_pri &&
@@ -1112,9 +1145,17 @@ PWR_EXPORT(PWR_Status) pwr_engine_reconfigure(PWR_Engine* eng,
     if (st != PWR_STATUS_OK) { return st; }
 
     needs_realloc = (pwr_dims_equal(&eng->cfg, &local) == 0) ? 1 : 0;
+    /* Everything the chirp or the compression filter is built from.  The RF
+     * parameters matter even on the lightweight path: a bandwidth or pulse
+     * width change often leaves every buffer dimension - including the
+     * power-of-two FFT size - untouched, and without a rebuild the engine
+     * would keep compressing with the previous waveform. */
     waveform_dirty = (local.range_window != eng->cfg.range_window ||
                       local.enable_pulse_compression !=
-                          eng->cfg.enable_pulse_compression) ? 1 : 0;
+                          eng->cfg.enable_pulse_compression ||
+                      local.bandwidth_hz   != eng->cfg.bandwidth_hz ||
+                      local.pulse_width_s  != eng->cfg.pulse_width_s ||
+                      local.sample_rate_hz != eng->cfg.sample_rate_hz) ? 1 : 0;
 
     pwr_engine_lock_proc_fair(eng);
     {
@@ -1124,6 +1165,10 @@ PWR_EXPORT(PWR_Status) pwr_engine_reconfigure(PWR_Engine* eng,
         pwr_engine_apply_pending_locked(eng);
         eng->cfg = local;
         (void)pwr_config_derive(&eng->cfg, &eng->dm);
+        /* Display-decay CPIs pending from before the reconfiguration were
+         * accrued under the old persistence and CPI duration; billing them
+         * at the new rate would flash the whole afterglow for a frame. */
+        eng->ppi_decay_pending = 0u;
         if (needs_realloc != 0)
         {
             PWR_SimTarget saved[PWR_MAX_SIM_TARGETS];
@@ -1156,6 +1201,8 @@ PWR_EXPORT(PWR_Status) pwr_engine_reconfigure(PWR_Engine* eng,
             {
                 st = pwr_waveform_build(&eng->wf, &eng->cfg, &eng->dm,
                                         eng->plan_fast);
+                /* The pulse length feeds the compression copy width. */
+                pwr_engine_update_fast_copy(eng);
             }
             if (st == PWR_STATUS_OK)
             {

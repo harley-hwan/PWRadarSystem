@@ -54,10 +54,13 @@ void pwr_chain_pulse_compress(struct PWR_Engine* e)
         if (e->cfg.enable_pulse_compression != 0)
         {
             PWR_Complex* PWR_RESTRICT w = e->fast_scratch;
+            /* Only the gated window can reach a displayed bin; the rest of
+             * the transform stays zero padding for the circular wrap. */
+            const uint32_t n_copy = e->fast_copy;
 
-            memcpy(w, src, (size_t)n_samples * sizeof(PWR_Complex));
-            memset(w + n_samples, 0,
-                   (size_t)(n_fft - n_samples) * sizeof(PWR_Complex));
+            memcpy(w, src, (size_t)n_copy * sizeof(PWR_Complex));
+            memset(w + n_copy, 0,
+                   (size_t)(n_fft - n_copy) * sizeof(PWR_Complex));
 
             pwr_fft_run(e->plan_fast, w);
             for (i = 0u; i < n_fft; ++i)
@@ -308,13 +311,23 @@ void pwr_chain_products(struct PWR_Engine* e)
     uint32_t r, j;
 
     /* ---- range profile: peak over Doppler (classic max-hold A-scope) ---- */
-    for (r = 0u; r < n_range; ++r) { e->profile_pow[r] = 0.0f; }
+    for (r = 0u; r < n_range; ++r)
+    {
+        e->profile_pow[r]    = 0.0f;
+        e->profile_peak_j[r] = 0u;
+    }
     for (j = 0u; j < n_dop; ++j)
     {
         const pwr_real* PWR_RESTRICT row = &e->rd_pow[(size_t)j * n_range];
         for (r = 0u; r < n_range; ++r)
         {
-            if (row[r] > e->profile_pow[r]) { e->profile_pow[r] = row[r]; }
+            if (row[r] > e->profile_pow[r])
+            {
+                e->profile_pow[r] = row[r];
+                /* Argmax row for the CFAR threshold trace: the trace reports
+                 * the threshold in the cell the A-scope actually shows. */
+                e->profile_peak_j[r] = j;
+            }
         }
     }
 
@@ -353,16 +366,32 @@ void pwr_display_update_ppi(struct PWR_Engine* e)
 
     if (e->ppi_accum == NULL) { return; }
 
-    /* Exponential persistence, applied once per CPI in Q16. */
+    /* Exponential persistence in Q16.  The decay pass touches every cell of
+     * the accumulator, so it is batched to every fourth CPI - but only when
+     * the persistence constant spans at least 32 CPIs, which bounds one
+     * batched step (and the transient over- or under-brightness a cell can
+     * carry either side of it) to a fraction of a decibel.  Shorter
+     * constants decay every CPI, where the pass is cheap relative to the
+     * CPI budget anyway. */
     if (e->cfg.ppi_persistence_s > 0.0)
     {
-        const double decay = exp(-e->dm.cpi_duration_s / e->cfg.ppi_persistence_s);
-        const uint32_t f = (uint32_t)pwr_clampd(decay * 65536.0 + 0.5, 0.0, 65536.0);
-        const size_t total = (size_t)cells * n_range;
-        size_t i;
-        for (i = 0u; i < total; ++i)
+        const uint32_t batch =
+            (e->cfg.ppi_persistence_s >= 32.0 * e->dm.cpi_duration_s) ? 4u : 1u;
+        ++e->ppi_decay_pending;
+        if (e->ppi_decay_pending >= batch)
         {
-            e->ppi_accum[i] = (uint16_t)(((uint32_t)e->ppi_accum[i] * f) >> 16u);
+            const double decay = exp(-(double)e->ppi_decay_pending *
+                                     e->dm.cpi_duration_s /
+                                     e->cfg.ppi_persistence_s);
+            const uint32_t f = (uint32_t)pwr_clampd(decay * 65536.0 + 0.5,
+                                                    0.0, 65536.0);
+            const size_t total = (size_t)cells * n_range;
+            size_t i;
+            for (i = 0u; i < total; ++i)
+            {
+                e->ppi_accum[i] = (uint16_t)(((uint32_t)e->ppi_accum[i] * f) >> 16u);
+            }
+            e->ppi_decay_pending = 0u;
         }
     }
 

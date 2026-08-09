@@ -75,26 +75,6 @@ cmake --build build -j
 
 CMake 없이 Linux에서 바로 빌드하려면 `make -j && make test` 도 됩니다.
 
-### 경고 정책
-
-GCC/Clang 쪽은 다음 수준에서 **경고 0개**로 검증되었습니다:
-
-```
--Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wstrict-prototypes
--Wmissing-prototypes -Wcast-qual -Wpointer-arith -Wwrite-strings
-```
-
-MSVC `/W4`도 검증되었습니다: 실제 Windows 11에서 MSVC 19.44(VS 2022 v143,
-x64)로 Release·Debug 전 구성의 25개 번역 단위가 **경고 0개**이고,
-`-DPWR_WERROR=ON`(/WX) 빌드도 두 구성 모두 통과합니다(2026-08-08, selftest
-9/9 기준선 일치). 그래도 **경고를 에러로 취급하는 옵션은 기본 해제**를
-유지합니다 — 새 컴파일러 버전이 추가하는 진단이 첫 빌드를 깨뜨리지 않게
-하기 위한 정책입니다. 켜려면:
-
-```sh
-cmake -S . -B build -DPWR_WERROR=ON
-```
-
 ### Windows 코드 경로 교차 검증
 
 Linux에서 MSVC 없이 Win32 계층 전체를 컴파일·링크해 볼 수 있습니다:
@@ -115,14 +95,6 @@ sudo apt install mingw-w64
 3. **실행** — wine이 설치되어 있으면 방금 만든 `PWRadarUI.exe --selftest` 를
    **실제로 실행**합니다. "컴파일된다"와 "동작한다"는 다른 주장이기 때문입니다.
    §1.1의 버그는 `-Werror` 를 무경고로 통과하고 런타임에만 나타났습니다.
-
-검증 상태: Windows 경로는 컴파일·링크(무경고) → `--selftest` 9/9 → Xvfb 위에서
-GUI 40프레임 렌더까지 wine으로 **실행 확인** 완료. Linux 경로는 컴파일·링크·
-실행·수치 검증 9/9·CTest·렌더링 확인 완료. 한때 남아 있던 미확인 영역 —
-**MSVC 고유 진단**과 **실제 Windows 커널에서의 실행** — 도 닫혔습니다: 실제
-Windows 11에서 MSVC 19.44(VS 2022)로 Release·Debug 전 구성 `/W4` 무경고,
-`-DPWR_WERROR=ON`(/WX) 빌드 통과, `--selftest` 9/9 실행까지 확인했습니다
-(2026-08-08).
 
 ### 1.1 `PWR_OK` 를 쓰지 않는 이유 (실제로 겪은 버그)
 
@@ -398,7 +370,7 @@ T4는 greedy가 8을 고르는 3×4 문제를 씁니다 — 증강경로 탐색�
 
 ---
 
-## 6. 기본 형상과 실측 성능
+## 6. 기본 형상
 
 S밴드 연안 감시 레이다:
 
@@ -415,16 +387,10 @@ S밴드 연안 감시 레이다:
 | 잡음 전력 | −103.0 dBm |
 | 탐지거리 (13 dB SNR) | 0.1 m² 18.7 km / 1 m² 33.2 km / 100 m² 105 km |
 
-2-vCPU 클라우드 VM에서 측정된 단계별 시간 (EWMA, ms):
-
-```
-simulate 1.8  compress 4.2  MTI 0.0  Doppler 1.1  CFAR 2.8  cluster 0.05  track 0.01
-total 11.0 ms  /  예산 10.67 ms  →  부하율 1.03,  91 CPI/s
-```
-
-실제 개발 워크스테이션에서는 여유가 크게 남습니다. 부하율이 1을 넘으면
-운용자가 `speed` 슬라이더(0.05×–8×)로 슬로모션을 걸 수 있고, 시나리오
-시간은 벽시계와 분리되어 있으므로 그림은 언제나 물리적으로 일관됩니다.
+단계별 처리 시간은 상태바와 DSP 탭에 EWMA로 표시되고, 부하율은
+`t_total / CPI 예산`입니다. 부하율이 1을 넘는 저사양 환경에서는 운용자가
+`speed` 슬라이더(0.05×–8×)로 슬로모션을 걸 수 있고, 시나리오 시간은
+벽시계와 분리되어 있으므로 그림은 언제나 물리적으로 일관됩니다.
 
 ---
 

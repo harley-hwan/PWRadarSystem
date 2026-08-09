@@ -465,6 +465,22 @@ PWR_EXPORT(PWR_Status) pwr_config_derive(const PWR_RadarConfig* cfg,
             if (bins < 1u) { bins = 1u; }
         }
         out->samples_per_pri = spp;
+
+        /* The fast-time FFT only has to span the samples that can reach a
+         * displayed range bin - the gate window plus one uncompressed pulse -
+         * with two further pulse lengths of zero padding so the circular
+         * convolution's wrap-around (the matched taps and the equaliser's
+         * acausal tail) lands in silence.  A short displayed span therefore
+         * buys a proportionally smaller transform; the full PRI stays the
+         * upper bound.  The engine keeps the matching copy width in
+         * fast_copy. */
+        {
+            const uint32_t need  = offset + (bins - 1u) * decim + 1u + n_tx;
+            const uint32_t full  = pwr_pow2_ceil(spp + n_tx);
+            uint32_t       gated = pwr_pow2_ceil(need + 2u * n_tx);
+            if (gated > full) { gated = full; }
+            out->fast_time_fft_size = gated;
+        }
     }
 
     out->wavelength_m               = lambda;
@@ -489,7 +505,6 @@ PWR_EXPORT(PWR_Status) pwr_config_derive(const PWR_RadarConfig* cfg,
     out->range_bin_spacing_m        = bin_raw * (double)decim;
     out->range_bins                 = bins;
     out->doppler_bins               = cfg->doppler_bins;
-    out->fast_time_fft_size         = pwr_pow2_ceil(spp + n_tx);
     out->azimuth_cell_deg           = 360.0 / (double)pwr_maxu(cfg->ppi_azimuth_cells, 1u);
     out->scan_period_s              = (cfg->scan_rate_rpm > 0.0)
                                       ? (60.0 / cfg->scan_rate_rpm) : 0.0;
