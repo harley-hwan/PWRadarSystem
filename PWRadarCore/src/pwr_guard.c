@@ -1,44 +1,29 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarCore (internal)
- *  ------------------------------------------------------------------------
- *  File     : pwr_guard.c
- *  Purpose  : Compile-time guard translation unit.  Emits no code; exists so
- *             that a class of silent-miscompilation bug becomes a build error.
+/* Compile-time guards. Emits no code; exists so that a class of silent
+ * miscompilation becomes a build error instead.
  *
- *  Language : ISO C17
+ * <winuser.h> defines the legacy WM_POWER constants as object-like macros:
  *
- *  Why a whole file for this
- *  ------------------------
- *  <winuser.h> defines the legacy WM_POWER broadcast constants as object-like
- *  macros:
+ *     #define PWR_OK              1
+ *     #define PWR_FAIL            (-1)
+ *     #define PWR_SUSPENDREQUEST  1
+ *     #define PWR_CRITICALRESUME  3
  *
- *      #define PWR_OK              1
- *      #define PWR_FAIL            (-1)
- *      #define PWR_SUSPENDREQUEST  1
- *      #define PWR_CRITICALRESUME  3
+ * A macro beats an enumerator regardless of scope, so an enumerator named
+ * PWR_OK is rewritten to 1 in every translation unit that reaches <windows.h>:
+ * "return PWR_OK;" becomes "return 1;" and every caller's success test fires.
+ * It compiles clean at -Werror and the Linux build is unaffected.
  *
- *  A macro beats an enumerator regardless of scope, so an enumerator named
- *  PWR_OK is textually rewritten to `1` in every translation unit that reaches
- *  <windows.h>.  `return PWR_OK;` silently becomes `return 1;`, every
- *  `status != PWR_OK` test fires, and the failure surfaces far from the cause -
- *  in this project's history, as "engine creation failed: thread failure" from
- *  a mutex that had initialised perfectly.  It compiles clean at -Werror and
- *  the Linux build is entirely unaffected.
+ * A tripwire inside pwr_status.h cannot catch it. The public headers are
+ * included before <windows.h> in every real translation unit, so the macro
+ * does not exist yet when the tripwire is evaluated, and no ordering rule can
+ * be imposed on downstream code.
  *
- *  A `#if defined(...)` tripwire inside pwr_status.h does NOT catch this: the
- *  public headers are included *before* <windows.h> in every real translation
- *  unit, so at the point the tripwire is evaluated the offending macro does
- *  not exist yet.  The check only works if the system header is seen first,
- *  and no ordering rule can be enforced on downstream code.
- *
- *  This file fixes the ordering the only way that is actually reliable: it
- *  pulls in the platform headers FIRST and the public API SECOND, then asserts
- *  that every public name is still an identifier.  It is compiled as part of
- *  the library, so a collision breaks the build no matter what any other
- *  translation unit does.  tools/check_name_collisions.py performs the same
- *  check over the whole SDK ahead of the compiler, which covers names that
- *  live in headers this file does not happen to include.
- * ========================================================================== */
+ * This file controls the order instead: platform headers first, public API
+ * second, then assert that every public name is still an identifier. It is
+ * compiled into the library, so a collision breaks the build whatever any
+ * other translation unit does. tools/check_name_collisions.py sweeps the whole
+ * SDK ahead of the compiler, covering names this file does not include.
+ */
 
 /* ---- 1. System headers first, deliberately ----------------------------- */
 #if defined(_WIN32)

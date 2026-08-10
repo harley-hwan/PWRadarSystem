@@ -1,23 +1,17 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarCore
- *  ------------------------------------------------------------------------
- *  File    : pwr_selftest.c
- *  Purpose : Built-in numerical acceptance suite.  Exported so the console can
- *            run it at start-up and so a CI job can gate a build on it.
+/* Built-in numerical acceptance suite. Exported so the console can run it at
+ * start-up and a CI job can gate a build on it.
  *
- *  Every case asserts a property that a defect in the chain would break:
- *    T1  FFT agrees with a direct DFT and round-trips.
- *    T2  window tapers are positive, unit-peak and have a sane ENBW.
- *    T3  order statistics agree with a full sort.
- *    T4  the linear-assignment solver reaches the known optimum.
- *    T5  the 2x2 Kalman helpers invert and stay symmetric.
- *    T6  a noise-free point target compresses into the correct range bin.
- *    T7  a target's measured range rate matches its true range rate.
- *    T8  the noise-only false-alarm rate tracks the design Pfa.
- *    T9  a straight-line target is tracked to within a few tens of metres.
- *
- *  Language: ISO C17
- * ========================================================================== */
+ * Every case asserts a property a defect in the chain would break:
+ *   T1  FFT agrees with a direct DFT and round-trips
+ *   T2  window tapers are positive, unit-peak and have a sane ENBW
+ *   T3  order statistics agree with a full sort
+ *   T4  the linear-assignment solver reaches the known optimum
+ *   T5  the 2x2 Kalman helpers invert and stay symmetric
+ *   T6  a noise-free point target compresses into the correct range bin
+ *   T7  a target's measured range rate matches its true range rate
+ *   T8  the noise-only false-alarm rate tracks the design Pfa
+ *   T9  a straight-line target is tracked to within a few tens of metres
+ */
 #include "pwr_core.h"
 
 #include <stdarg.h>

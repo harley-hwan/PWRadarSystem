@@ -1,24 +1,15 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarUI
- *  ------------------------------------------------------------------------
- *  File    : ui_ppi.h
- *  Purpose : Plan-position-indicator scope: the display an operator actually
- *            watches.  Range rings and bearing spokes, log-compressed radar
- *            video painted from the engine's polar buffer, the rotating beam
- *            with its afterglow, plot and track symbology with history trails,
- *            an optional ground-truth overlay for verification, and a bearing
- *            and range readout under the cursor.
+/* Plan-position-indicator scope - the display an operator actually watches.
+ * Range rings and bearing spokes, log-compressed video painted from the
+ * engine's polar buffer, the rotating beam and its afterglow, plot and track
+ * symbology with history trails, an optional ground-truth overlay, and a
+ * bearing/range readout under the cursor.
  *
- *  Polar to raster conversion
- *  --------------------------
- *  Every destination pixel needs an (azimuth cell, range gate) pair, which
- *  costs an atan2 and a sqrt.  At 700 x 700 that is half a million transcen-
- *  dental calls per frame, so the mapping is cached in an index table and
- *  rebuilt only when the geometry or the range scale changes.  Painting is then
- *  a pair of indexed fetches per pixel.
- *
- *  Language: ISO C17
- * ========================================================================== */
+ * Every destination pixel needs an (azimuth cell, range gate) pair, which costs
+ * an atan2 and a sqrt - half a million transcendental calls per frame at
+ * 700x700. So the mapping is cached in an index table and rebuilt only when the
+ * geometry or the range scale changes; painting is then two indexed fetches per
+ * pixel.
+ */
 #ifndef PWRADAR_UI_PPI_H
 #define PWRADAR_UI_PPI_H
 

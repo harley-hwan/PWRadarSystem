@@ -1,35 +1,25 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarUI
- *  ------------------------------------------------------------------------
- *  File    : ui_app.c
- *  Purpose : The verification console.
+/* The verification console.
  *
- *  Screen layout
- *  -------------
- *      +----------------------------------------------------------------+
- *      | toolbar: run control, scenario, scan state, throughput          |
- *      +---------+--------------------------+---------------------------+
- *      | control |  PPI scope   | R-D map   |  track table              |
- *      | panel   |--------------+-----------|                           |
- *      | (tabs)  |  A-scope     | RTI/spec  |  readouts                 |
- *      +---------+--------------------------+---------------------------+
- *      | status: cursor readout, stage timings, load factor              |
- *      +----------------------------------------------------------------+
+ *   +----------------------------------------------------------------+
+ *   | toolbar: run control, scenario, scan state, throughput          |
+ *   +---------+--------------------------+---------------------------+
+ *   | control |  PPI scope   | R-D map   |  track table              |
+ *   | panel   |--------------+-----------|                           |
+ *   | (tabs)  |  A-scope     | RTI/spec  |  readouts                 |
+ *   +---------+--------------------------+---------------------------+
+ *   | status: cursor readout, stage timings, load factor              |
+ *   +----------------------------------------------------------------+
  *
- *  Every boundary is a draggable splitter and every display has independent
- *  zoom, pan and a data cursor, so an engineer can enlarge whichever product
- *  is under investigation without losing the others.
+ * Every boundary is a draggable splitter and every display has its own zoom,
+ * pan and data cursor, so whichever product is under investigation can be
+ * enlarged without losing the others.
  *
- *  Configuration flow
- *  ------------------
- *  Controls edit a local copy of PWR_RadarConfig and raise a dirty flag; the
- *  copy is pushed to the engine once, at the end of the frame.  That keeps a
- *  slider drag from triggering one reconfiguration per pixel of travel, and it
- *  means a rejected configuration can be reported without ever leaving the
- *  engine in a half-applied state.
- *
- *  Language: ISO C17
- * ========================================================================== */
+ * Controls edit a local copy of PWR_RadarConfig and raise a dirty flag; the
+ * copy is pushed to the engine once, at the end of the frame. That keeps a
+ * slider drag from triggering one reconfiguration per pixel of travel, and it
+ * means a rejected configuration can be reported without ever leaving the
+ * engine half-applied.
+ */
 #include "ui_app.h"
 
 #include <math.h>

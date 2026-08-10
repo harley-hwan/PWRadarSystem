@@ -1,34 +1,18 @@
-/* ==========================================================================
- *  PWRadarSystem - PW Radar Detection System
- *  ------------------------------------------------------------------------
- *  File     : pwr_api.h
- *  Module   : PWRadarCore (public)
- *  Purpose  : The complete exported surface of PWRadarCore.dll / libpwradar.
+/* Everything PWRadarCore exports.
  *
- *  Threading contract
- *  ------------------
- *    * pwr_engine_create / _destroy            : caller-serialised.
- *    * pwr_engine_frame_acquire / _release     : safe from one consumer
- *                                                thread concurrently with the
- *                                                internal worker.
- *    * every other pwr_engine_* setter         : safe from any thread and
- *                                                non-blocking - the change is
- *                                                queued and takes effect at
- *                                                the next CPI boundary, or
- *                                                immediately when the engine
- *                                                is idle.  Exceptions that do
- *                                                block for the current CPI:
- *                                                pwr_engine_reconfigure and
- *                                                the target list mutators.
+ * Threading:
+ *   create / destroy            caller-serialised
+ *   frame_acquire / _release    one consumer thread, concurrent with the worker
+ *   every other setter          any thread, non-blocking - the change is queued
+ *                               to the next CPI boundary, or applied at once
+ *                               when the engine is idle
  *
- *  Build-time switches
- *  -------------------
- *    PWR_BUILD_SHARED   defined while compiling the library as a shared object
- *    PWR_BUILD_STATIC   defined to build/consume a static library
- *    (neither)          consuming the shared object -> dllimport on Windows
+ * pwr_engine_reconfigure and the target-list mutators are the exceptions: they
+ * block for the current CPI.
  *
- *  Language : ISO C17
- * ========================================================================== */
+ * Build switches: PWR_BUILD_SHARED when compiling the library, PWR_BUILD_STATIC
+ * for a static build, neither when consuming the DLL (dllimport on Windows).
+ */
 #ifndef PWRADAR_PWR_API_H
 #define PWRADAR_PWR_API_H
 

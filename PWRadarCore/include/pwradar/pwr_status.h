@@ -1,13 +1,4 @@
-/* ==========================================================================
- *  PWRadarSystem - PW Radar Detection System
- *  ------------------------------------------------------------------------
- *  File     : pwr_status.h
- *  Module   : PWRadarCore (public)
- *  Purpose  : Uniform status / error code vocabulary for the whole library.
- *             Every fallible exported entry point returns PWR_Status.
- *
- *  Language : ISO C17
- * ========================================================================== */
+/* Status codes. Every fallible exported entry point returns PWR_Status. */
 #ifndef PWRADAR_PWR_STATUS_H
 #define PWRADAR_PWR_STATUS_H
 

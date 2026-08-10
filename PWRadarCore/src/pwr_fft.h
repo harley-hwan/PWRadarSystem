@@ -1,21 +1,13 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarCore (internal)
- *  File    : pwr_fft.h
- *  Purpose : Self-contained power-of-two complex FFT.
+/* Self-contained power-of-two complex FFT.
  *
- *            Implementation notes
- *            --------------------
- *            * Decimation-in-time Cooley-Tukey, radix-4 for the even part of
- *              log2(n) with a single radix-2 stage when log2(n) is odd. This
- *              yields ~25% fewer real multiplies than pure radix-2.
- *            * Twiddle factors and the digit-reversal permutation are
- *              precomputed once per plan; the transform itself performs no
- *              allocation and no trigonometry.
- *            * A plan is immutable after creation, therefore several worker
- *              threads may share one plan concurrently as long as each uses
- *              its own data buffer.
- *  Language: ISO C17
- * ========================================================================== */
+ * Decimation-in-time Cooley-Tukey: radix-4 for the even part of log2(n), plus
+ * one radix-2 stage when log2(n) is odd. About 25% fewer real multiplies than
+ * pure radix-2.
+ *
+ * Twiddles and the digit-reversal permutation are precomputed per plan; the
+ * transform allocates nothing and calls no trigonometry. A plan is immutable
+ * once created, so threads may share one as long as each has its own buffer.
+ */
 #ifndef PWRADAR_PWR_FFT_H
 #define PWRADAR_PWR_FFT_H
 

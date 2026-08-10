@@ -1,8 +1,3 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarCore (internal)
- *  File    : pwr_math.c
- *  Language: ISO C17
- * ========================================================================== */
 #include "pwr_math.h"
 
 #include <string.h>

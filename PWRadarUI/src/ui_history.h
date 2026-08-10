@@ -1,20 +1,12 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarUI
- *  ------------------------------------------------------------------------
- *  File    : ui_history.h
- *  Purpose : Presentation-side history for the verification console: full
- *            track and truth paths, and a scan-persistent plot memory.
+/* Presentation-side history: full track and truth paths, and a scan-persistent
+ * plot memory.
  *
- *            The engine deliberately publishes only the live picture plus a
- *            short symbol trail - long-term history is display state, so it
- *            is accumulated here from frames the console has already
- *            acquired.  Path points are coalesced on entry (minimum spacing
- *            in metres) and aged out against a retention window, so hours of
- *            scenario fit in a few hundred kilobytes and the draw cost stays
- *            bounded.
- *
- *  Language: ISO C17
- * ========================================================================== */
+ * The engine publishes only the live picture plus a short symbol trail -
+ * long-term history is display state, so it is accumulated here from frames the
+ * console has already acquired. Path points are coalesced on entry (minimum
+ * spacing in metres) and aged out against a retention window, so hours of
+ * scenario fit in a few hundred kilobytes and the draw cost stays bounded.
+ */
 #ifndef PWRADAR_UI_HISTORY_H
 #define PWRADAR_UI_HISTORY_H
 

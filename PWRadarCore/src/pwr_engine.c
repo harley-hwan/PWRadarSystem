@@ -1,20 +1,11 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarCore
- *  ------------------------------------------------------------------------
- *  File    : pwr_engine.c
- *  Purpose : Engine life cycle, buffer management, the real-time worker, the
- *            triple-buffered frame publication scheme, and every exported
- *            entry point declared in pwr_api.h.
+/* Engine life cycle, buffers, the real-time worker, frame publication, and
+ * every entry point declared in pwr_api.h.
  *
- *  Frame publication
- *  -----------------
- *  Three identical frame stores rotate.  The producer always writes into a
- *  slot that is neither the newest published slot nor the slot a consumer is
- *  holding, so it never blocks and the consumer never sees a torn frame.
- *  With three slots such a target always exists.
- *
- *  Language: ISO C17
- * ========================================================================== */
+ * Frame publication rotates three identical stores. The producer always writes
+ * to a slot that is neither the newest published one nor the one a consumer
+ * holds; with three slots such a slot always exists, so the producer never
+ * blocks and the consumer never sees a torn frame.
+ */
 #include "pwr_core.h"
 
 #include <stdarg.h>

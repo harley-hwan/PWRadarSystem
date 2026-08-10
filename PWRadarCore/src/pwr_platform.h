@@ -1,13 +1,7 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarCore (internal)
- *  ------------------------------------------------------------------------
- *  File     : pwr_platform.h
- *  Purpose  : The single place where operating-system dependencies live.
- *             Threads, mutexes, atomics, monotonic clock, aligned memory.
- *             Nothing else in PWRadarCore may include <windows.h>/<pthread.h>.
- *
- *  Language : ISO C17
- * ========================================================================== */
+/* The single place operating-system dependencies live: threads, mutexes,
+ * atomics, monotonic clock, aligned memory. Nothing else in PWRadarCore may
+ * include <windows.h> or <pthread.h>.
+ */
 #ifndef PWRADAR_PWR_PLATFORM_H
 #define PWRADAR_PWR_PLATFORM_H
 

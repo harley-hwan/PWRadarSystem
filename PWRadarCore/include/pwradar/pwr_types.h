@@ -1,20 +1,11 @@
-/* ==========================================================================
- *  PWRadarSystem - PW Radar Detection System
- *  ------------------------------------------------------------------------
- *  File     : pwr_types.h
- *  Module   : PWRadarCore (public)
- *  Purpose  : All data types that cross the PWRadarCore.dll boundary.
+/* Everything that crosses the DLL boundary.
  *
- *             The layout of every structure declared here is part of
- *             PWR_ABI_VERSION.  Rules for maintainers:
- *               - Members are ordered largest-alignment-first so that the
- *                 layout is identical under MSVC x64 and GCC/Clang x86-64.
- *               - No bitfields, no `bool`, no enums as struct members with
- *                 implementation-defined width: enums are stored as int32_t.
- *               - Fixed-width integer types only.
- *
- *  Language : ISO C17
- * ========================================================================== */
+ * These layouts are part of PWR_ABI_VERSION. When changing them:
+ *   - order members largest-alignment-first, so MSVC x64 and GCC/Clang x86-64
+ *     agree on the layout
+ *   - no bitfields, no bool, no enum-typed members (store enums as int32_t)
+ *   - fixed-width integer types only
+ */
 #ifndef PWRADAR_PWR_TYPES_H
 #define PWRADAR_PWR_TYPES_H
 

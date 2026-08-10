@@ -1,22 +1,14 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarUI
- *  ------------------------------------------------------------------------
- *  File    : ui_gfx.h
- *  Purpose : The software renderer.  Everything the console draws goes through
- *            here, so Windows and Linux produce byte-identical frames.
+/* The software renderer. Everything the console draws goes through here, so
+ * Windows and Linux produce byte-identical frames.
  *
- *  Conventions
- *  -----------
- *   * Colour is 0xAARRGGBB.  Alpha 255 is opaque; source-over blending.
- *   * Coordinates are floating point with pixel centres at (i + 0.5).  Integer
- *     entry points exist for crisp one-pixel UI chrome.
- *   * Every primitive is clipped to the canvas clip rectangle, which is a
- *     stack so a widget can nest its own clip and restore it.
- *   * The renderer and the plotting layer above it keep static scratch
- *     buffers, so all drawing must stay on a single thread.
- *
- *  Language: ISO C17
- * ========================================================================== */
+ *   - colour is 0xAARRGGBB, alpha 255 opaque, source-over blending
+ *   - coordinates are floating point with pixel centres at (i + 0.5); integer
+ *     entry points exist for crisp one-pixel chrome
+ *   - every primitive is clipped to the canvas clip rectangle, which is a stack
+ *     so a widget can nest its own clip and restore it
+ *   - this layer and the plotting layer above it keep static scratch buffers,
+ *     so all drawing must stay on one thread
+ */
 #ifndef PWRADAR_UI_GFX_H
 #define PWRADAR_UI_GFX_H
 

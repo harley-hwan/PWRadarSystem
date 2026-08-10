@@ -1,21 +1,14 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarCore (internal)
- *  ------------------------------------------------------------------------
- *  File    : pwr_config.c
- *  Purpose : Default configuration, validation, clamping and every derived
- *            radar metric.  Pure functions - no engine state is touched.
- *  Language: ISO C17
+/* Defaults, validation, clamping and every derived radar metric. Pure
+ * functions - no engine state is touched.
  *
- *  Sign and axis conventions fixed here and honoured everywhere else
- *  ----------------------------------------------------------------
- *   * Range bin index == matched-filter delay sample index, therefore
- *         range(i) = range_first_m + i * range_step_m .
- *   * Radial velocity is the range rate r-dot: positive == receding.
- *     Doppler frequency fd = -2 * rdot / lambda.
- *   * The published Doppler axis is ordered by increasing range rate, so
- *     column 0 is the fastest closing target.  See pwr_chain_doppler().
- *   * Azimuth is compass bearing: 0 deg == North (+y), 90 deg == East (+x).
- * ========================================================================== */
+ * Conventions fixed here and honoured everywhere else:
+ *   - range bin index == matched-filter delay sample, so
+ *     range(i) = range_first_m + i * range_step_m
+ *   - radial velocity is range rate, positive == receding, fd = -2*rdot/lambda
+ *   - the published Doppler axis increases with range rate, so column 0 is the
+ *     fastest closing target (see pwr_chain_doppler)
+ *   - azimuth is compass bearing: 0 == North (+y), 90 == East (+x)
+ */
 #include "pwr_core.h"
 
 #include <stdarg.h>

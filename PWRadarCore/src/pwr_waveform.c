@@ -1,45 +1,32 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarCore (internal)
- *  ------------------------------------------------------------------------
- *  File    : pwr_waveform.c
- *  Purpose : Linear-FM transmit waveform and the range-compression filter.
+/* Linear-FM transmit waveform and the range-compression filter.
  *
- *  Waveform
- *  --------
- *      s(t) = exp( j * pi * K * t^2 ),  K = B / Tp,  |t| <= Tp/2
- *  sampled as   tx[m] = s( (m - (Ntx-1)/2) / fs ),  m = 0 .. Ntx-1
+ *   s(t) = exp(j*pi*K*t^2),  K = B/Tp,  |t| <= Tp/2
+ *   tx[m] = s((m - (Ntx-1)/2) / fs),    m = 0 .. Ntx-1
  *
- *  Compression filter
- *  ------------------
- *  Compression is a correlation, realised in the frequency domain, so that the
- *  output index equals the echo delay in samples exactly and
- *          range(i) = c * i / (2*fs)
- *  needs no group-delay correction anywhere else in the chain.
+ * Compression is a correlation done in the frequency domain, so the output
+ * index equals the echo delay in samples and range(i) = c*i/(2*fs) needs no
+ * group-delay correction anywhere else.
  *
- *  Weighting is applied in the *frequency* domain with spectral equalisation:
+ * Weighting is applied in frequency with spectral equalisation
  *
- *      H(f) = conj(TX(f)) * W(f) / ( |TX(f)|^2 + eps )
+ *     H(f) = conj(TX(f)) * W(f) / (|TX(f)|^2 + eps)
  *
- *  rather than by tapering the time-domain replica.  This matters, and it is
- *  what real pulse compressors do.  Tapering the replica in time relies on the
- *  stationary-phase equivalence between time and frequency across the chirp,
- *  whose error scales as 1/sqrt(Tp*B).  At the time-bandwidth products a
- *  surveillance radar actually uses (100 is typical) the residual Fresnel
- *  ripple of the LFM spectrum leaves a flat pedestal of paired echoes near
- *  -40 dBc spread over the whole +/-Tp support - far above the level the
- *  chosen taper nominally promises, and quite strong enough to raise phantom
- *  detections a full uncompressed pulse length either side of a large ship.
- *  Equalising |TX(f)| removes the ripple, so the achieved sidelobe level is
- *  the designed one.  eps caps the equalisation dynamic range and hence the
- *  noise amplification; the resulting mismatch loss is measured and reported.
+ * rather than by tapering the time-domain replica. Tapering in time relies on
+ * the stationary-phase equivalence between time and frequency across the
+ * chirp, whose error goes as 1/sqrt(Tp*B). At the time-bandwidth products a
+ * surveillance radar uses (100 is typical) the residual Fresnel ripple of the
+ * LFM spectrum leaves a flat pedestal of paired echoes near -40 dBc across the
+ * whole +/-Tp support - far above what the chosen taper promises, and strong
+ * enough to raise phantom detections a full uncompressed pulse length either
+ * side of a large ship. Equalising |TX(f)| removes the ripple, so the achieved
+ * sidelobe level is the designed one. eps caps the equalisation dynamic range
+ * and hence the noise amplification; the resulting mismatch loss is measured.
  *
- *  Everything the rest of the chain needs is *measured* here rather than
- *  assumed: the filter is normalised so a unit-amplitude echo produces a unit
- *  compressed peak, and noise_gain is then the exact amplitude gain applied to
- *  unit-variance white input, i.e. the sigma_pc the dB calibration uses.
- *
- *  Language: ISO C17
- * ========================================================================== */
+ * What the rest of the chain needs is measured here, not assumed: the filter
+ * is normalised so a unit-amplitude echo gives a unit compressed peak, and
+ * noise_gain is then the exact gain applied to unit-variance white input -
+ * the sigma_pc the dB calibration uses.
+ */
 #include "pwr_core.h"
 
 #include <string.h>

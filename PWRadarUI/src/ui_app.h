@@ -1,11 +1,6 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarUI
- *  ------------------------------------------------------------------------
- *  File    : ui_app.h
- *  Purpose : The verification console itself: layout, the control panel, the
- *            four displays and the binding to PWRadarCore.
- *  Language: ISO C17
- * ========================================================================== */
+/* The verification console: layout, the control panel, the four displays and
+ * the binding to PWRadarCore.
+ */
 #ifndef PWRADAR_UI_APP_H
 #define PWRADAR_UI_APP_H
 

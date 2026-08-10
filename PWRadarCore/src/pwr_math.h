@@ -1,13 +1,8 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarCore (internal)
- *  File    : pwr_math.h
- *  Purpose : Numeric primitives shared by the whole signal chain: complex
- *            arithmetic, decibel helpers, amplitude tapers, a reproducible
- *            random-number generator with the distributions the clutter and
- *            target models need, order statistics, and the small dense
- *            linear algebra used by the Kalman filter.
- *  Language: ISO C17
- * ========================================================================== */
+/* Numeric primitives shared by the whole chain: complex arithmetic, decibel
+ * helpers, amplitude tapers, a reproducible RNG with the distributions the
+ * clutter and target models need, order statistics, and the small dense linear
+ * algebra the Kalman filter uses.
+ */
 #ifndef PWRADAR_PWR_MATH_H
 #define PWRADAR_PWR_MATH_H
 

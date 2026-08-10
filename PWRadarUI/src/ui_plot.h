@@ -1,28 +1,17 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarUI
- *  ------------------------------------------------------------------------
- *  File    : ui_plot.h
- *  Purpose : MATLAB-equivalent plotting: an axes object with automatic 1-2-5
- *            ticks, grids, linear and logarithmic scales, box zoom, pan,
- *            zoom-to-fit, a data cursor, a legend, line/stairs/area/scatter
- *            series, imagesc with a colour bar, and a polar PPI scope.
+/* MATLAB-equivalent plotting: an axes object with automatic 1-2-5 ticks,
+ * grids, linear and log scales, box zoom, pan, zoom-to-fit, a data cursor, a
+ * legend, line/stairs/area/scatter series, and imagesc with a colour bar.
  *
- *  Correspondence with the MATLAB vocabulary an engineer already knows:
- *
- *      axes / xlim / ylim / xlabel / ylabel / title  -> UI_Axes fields
- *      plot                                          -> ui_plot_line*
- *      stairs                                        -> ui_plot_stairs
- *      area                                          -> ui_plot_area
- *      scatter                                       -> ui_plot_scatter
- *      semilogx / semilogy                           -> UI_Axes::xlog / ylog
- *      grid on / grid minor                          -> UI_Axes::grid
- *      legend                                        -> ui_legend
- *      imagesc + colormap + caxis + colorbar         -> ui_imagesc, ui_colorbar
- *      datacursormode                                -> UI_Axes::cursor_*
- *      zoom / pan / axis tight                       -> ui_axes_input
- *
- *  Language: ISO C17
- * ========================================================================== */
+ *   axes / xlim / ylim / xlabel / ylabel / title -> UI_Axes fields
+ *   plot                                         -> ui_plot_line*
+ *   stairs / area / scatter                      -> ui_plot_stairs / _area / _scatter
+ *   semilogx / semilogy                          -> UI_Axes::xlog / ylog
+ *   grid on / grid minor                         -> UI_Axes::grid
+ *   legend                                       -> ui_legend
+ *   imagesc + colormap + caxis + colorbar        -> ui_imagesc, ui_colorbar
+ *   datacursormode                               -> UI_Axes::cursor_*
+ *   zoom / pan / axis tight                      -> ui_axes_input
+ */
 #ifndef PWRADAR_UI_PLOT_H
 #define PWRADAR_UI_PLOT_H
 

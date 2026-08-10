@@ -1,22 +1,13 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarUI
- *  ------------------------------------------------------------------------
- *  File    : ui_platform_x11.c
- *  Purpose : X11 implementation of the platform layer.  libX11 only - no Xext,
- *            no toolkit, no GL.
+/* X11 platform layer. libX11 only - no Xext, no toolkit, no GL.
  *
- *  The framebuffer is a client-side buffer wrapped in an XImage and pushed
- *  with XPutImage.  MIT-SHM would avoid the copy but drags in libXext, so the
- *  plain path is used deliberately: at the console's frame rate the transfer
- *  is not the bottleneck, and the dependency list stays at exactly one library
- *  that every X installation already provides.
+ * The framebuffer is a client-side buffer wrapped in an XImage and pushed with
+ * XPutImage. MIT-SHM would avoid the copy but drags in libXext; at the
+ * console's frame rate the transfer is not the bottleneck, so the plain path
+ * keeps the dependency list at one library every X installation already has.
  *
- *  Only 24/32-bit TrueColor visuals are supported, which is every desktop
- *  since roughly 2005; anything else is reported as an error rather than
- *  silently rendered wrong.
- *
- *  Language: ISO C17
- * ========================================================================== */
+ * Only 24/32-bit TrueColor visuals are supported. Anything else is reported as
+ * an error rather than silently rendered wrong.
+ */
 #if !defined(_WIN32)
 
 #if !defined(_GNU_SOURCE)

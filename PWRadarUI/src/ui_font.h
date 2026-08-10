@@ -1,17 +1,9 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarUI
- *  ------------------------------------------------------------------------
- *  File    : ui_font.h
- *  Purpose : Embedded antialiased bitmap fonts.
+/* Embedded antialiased bitmap fonts.
  *
- *            The glyph atlases in ui_font_data.c are produced offline by
- *            tools/gen_font.py and checked in, so the console renders proper
- *            antialiased, correctly advanced text while linking against
- *            nothing but the C runtime - which is what "no external
- *            libraries" has to mean for a UI layer.
- *
- *  Language: ISO C17
- * ========================================================================== */
+ * The glyph atlases in ui_font_data.c are produced offline by tools/gen_font.py
+ * and checked in, so the console renders properly antialiased, correctly
+ * advanced text while linking against nothing but the C runtime.
+ */
 #ifndef PWRADAR_UI_FONT_H
 #define PWRADAR_UI_FONT_H
 

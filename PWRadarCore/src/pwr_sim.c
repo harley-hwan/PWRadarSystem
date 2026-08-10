@@ -1,40 +1,25 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarCore (internal)
- *  ------------------------------------------------------------------------
- *  File    : pwr_sim.c
- *  Purpose : Synthetic receiver front end.  Produces one CPI of complex
- *            baseband I/Q for a rotating-antenna surveillance radar, with
+/* Synthetic receiver front end: one CPI of complex baseband I/Q for a
+ * rotating-antenna surveillance radar. Covers thermal noise, point targets
+ * with exact fractional-delay chirp insertion, intra-CPI range walk and
+ * Doppler progression, Swerling 0-4 fluctuation, a two-way Gaussian antenna
+ * pattern, correlated sea clutter (R^-3, 4/3-earth horizon cut-off, Gaussian
+ * internal-motion spectrum), rain volume clutter (R^-2), a noise jammer seen
+ * through the pattern, two-ray multipath lobing, transmit eclipsing and
+ * optional range-ambiguity folding.
  *
- *              - thermal noise, normalised to unit power per complex sample
- *                (so every other level in the model is an SNR directly),
- *              - point targets with exact fractional-delay chirp insertion,
- *                intra-CPI range walk and Doppler phase progression,
- *              - Swerling 0/1/2/3/4 RCS fluctuation,
- *              - two-way Gaussian antenna pattern in azimuth and elevation,
- *              - correlated sea clutter with an R^-3 power law, a 4/3-earth
- *                horizon cut-off and a Gaussian internal-motion spectrum,
- *              - rain volume clutter with an R^-2 power law,
- *              - a stationary noise jammer seen through the antenna pattern,
- *              - flat-earth two-ray multipath lobing,
- *              - transmit eclipsing and optional range-ambiguity folding.
+ * Thermal noise variance is exactly 1.0 per complex sample, which is what makes
+ * every other level in the model an SNR directly. A target whose
+ * post-compression single-pulse SNR should be S is injected with per-sample
+ * amplitude
  *
- *  Reference levels
- *  ----------------
- *  Thermal noise variance is exactly 1.0 per complex sample.  A target whose
- *  post-compression single-pulse SNR should be S (linear) is injected with
- *  per-sample amplitude
+ *     A = sqrt(S) * sigma_pc
  *
- *          A = sqrt( S ) * sigma_pc
+ * because the compression filter is normalised for unit peak gain, so the peak
+ * signal amplitude out is A and the noise amplitude out is sigma_pc.
  *
- *  where sigma_pc is the compression filter's measured noise gain: the filter
- *  is normalised for unit peak gain, so the peak signal amplitude out is A and
- *  the noise amplitude out is sigma_pc.
- *
- *  Clutter-to-noise ratio from the configuration is referenced to a range of
- *  1 km, on the antenna boresight.
- *
- *  Language: ISO C17
- * ========================================================================== */
+ * Clutter-to-noise ratio from the configuration is referenced to 1 km on
+ * boresight.
+ */
 #include "pwr_core.h"
 
 #include <string.h>

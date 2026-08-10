@@ -1,16 +1,10 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarUI
- *  ------------------------------------------------------------------------
- *  File    : ui_platform_win32.c
- *  Purpose : Win32 implementation of the platform layer.  user32 + gdi32 only.
+/* Win32 platform layer. user32 + gdi32 only.
  *
- *  The framebuffer is a DIB section selected into a memory DC, which makes
- *  presentation a single BitBlt with no format conversion and no intermediate
- *  copy.  WM_PAINT simply re-blits the last frame, so resizing and occlusion
- *  never show garbage.
- *
- *  Language: ISO C17
- * ========================================================================== */
+ * The framebuffer is a DIB section selected into a memory DC, so presentation
+ * is a single BitBlt with no format conversion and no intermediate copy.
+ * WM_PAINT re-blits the last frame, so resizing and occlusion never show
+ * garbage.
+ */
 #if defined(_WIN32)
 
 #ifndef WIN32_LEAN_AND_MEAN

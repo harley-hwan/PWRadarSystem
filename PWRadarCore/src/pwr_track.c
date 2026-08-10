@@ -1,44 +1,32 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarCore (internal)
- *  ------------------------------------------------------------------------
- *  File    : pwr_track.c
- *  Purpose : Plot-to-track association and Kalman filtering.
+/* Plot-to-track association and Kalman filtering.
  *
- *  Filter
- *  ------
- *  Four-state constant-velocity model in a local East-North-Up frame:
- *      X = [ x  y  vx  vy ]'                (metres, metres/second)
- *      F = [ I  dt*I ; 0  I ]
- *      Q = discrete white-noise-acceleration model driven by sigma_a
- *      H = [ I  0 ]                         (Cartesian position measurement)
+ * Four-state constant-velocity filter in a local East-North-Up frame:
+ *   X = [x y vx vy]'          metres, metres/second
+ *   F = [I dt*I ; 0 I]
+ *   Q = discrete white-noise-acceleration, driven by sigma_a
+ *   H = [I 0]                 Cartesian position measurement
  *
- *  A polar detection (R, Az) is converted to Cartesian and its covariance is
- *  transported through the Jacobian
- *      J = [ sin Az   R cos Az ;  cos Az  -R sin Az ]
- *  so the down-range and cross-range uncertainties stay correctly shaped -
- *  the characteristic "banana" gate of a long-range radar.
+ * A polar detection (R, Az) is converted to Cartesian and its covariance
+ * transported through the Jacobian
  *
- *  The covariance update uses the Joseph form, which stays symmetric and
- *  positive definite over long coasting intervals where the plain
- *  (I - KH)P form is known to lose both.
+ *   J = [sin Az   R cos Az ; cos Az  -R sin Az]
  *
- *  Association
- *  -----------
- *  Cost = normalised innovation squared + ln det(S), the standard global
- *  nearest-neighbour metric; pairs failing the validation gate are marked
- *  infeasible.  The rectangular assignment problem is then solved exactly by
- *  the Jonker-Volgenant shortest-augmenting-path algorithm.
+ * so down-range and cross-range uncertainty stay correctly shaped - the
+ * characteristic "banana" gate of a long-range radar. The covariance update
+ * uses the Joseph form, which stays symmetric and positive definite over long
+ * coasting intervals where the plain (I-KH)P form is known to lose both.
  *
- *  Rotating-antenna bookkeeping
- *  ---------------------------
- *  A track is only *expected* to be seen while the beam is on it.  Every CPI
- *  all tracks are predicted forward, but only tracks whose predicted azimuth
- *  falls inside the illuminated arc take part in association and accrue a
- *  hit or a miss.  Without this, a 2.5 s scan period would coast every track
- *  to death within a fraction of a revolution.
+ * Association cost is normalised innovation squared plus ln det(S), the
+ * standard global nearest-neighbour metric; pairs failing the gate are marked
+ * infeasible. The rectangular assignment is then solved exactly by the
+ * Jonker-Volgenant shortest-augmenting-path algorithm.
  *
- *  Language: ISO C17
- * ========================================================================== */
+ * A track is only expected to be seen while the beam is on it. Every CPI all
+ * tracks are predicted forward, but only tracks the beam can plausibly have
+ * illuminated take part in association and accrue a hit or a miss - without
+ * that, a 2.5 s scan period would coast every track to death within a fraction
+ * of a revolution.
+ */
 #include "pwr_core.h"
 
 #include <string.h>

@@ -1,23 +1,16 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarCore (internal)
- *  ------------------------------------------------------------------------
- *  File    : pwr_core.h
- *  Purpose : Internal declarations shared by the signal-processing chain.
- *            Nothing here is exported from the shared library.
+/* Internal declarations shared by the signal-processing chain. None of this is
+ * exported.
  *
- *  Data-cube conventions used throughout the chain
- *  -----------------------------------------------
- *    rx      [pulse][fast-time sample]     n_pulses  x n_samples
- *    pc      [pulse][range bin]            n_pulses  x n_range
- *    slow    [range bin][doppler bin]      n_range   x n_doppler   (padded)
- *    rd_pow  [doppler bin][range bin]      n_doppler x n_range     (display)
+ * Data-cube shapes:
+ *   rx      [pulse][fast-time sample]   n_pulses  x n_samples
+ *   pc      [pulse][range bin]          n_pulses  x n_range
+ *   slow    [range bin][doppler bin]    n_range   x n_doppler  (padded)
+ *   rd_pow  [doppler bin][range bin]    n_doppler x n_range    (display)
  *
- *  The double transpose is deliberate: every FFT then runs over a contiguous
- *  row, and the final layout is exactly what the imagesc-style display and
- *  the range-axis CFAR sliding window want.
- *
- *  Language: ISO C17
- * ========================================================================== */
+ * The double transpose is deliberate: every FFT then runs over a contiguous
+ * row, and the final layout is what both the imagesc display and the
+ * range-axis CFAR window want.
+ */
 #ifndef PWRADAR_PWR_CORE_H
 #define PWRADAR_PWR_CORE_H
 

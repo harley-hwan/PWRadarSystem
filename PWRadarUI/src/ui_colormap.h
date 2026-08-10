@@ -1,17 +1,10 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarUI
- *  ------------------------------------------------------------------------
- *  File    : ui_colormap.h
- *  Purpose : The colour maps a radar console needs, in the same vocabulary an
- *            engineer already has from MATLAB, plus two that are specific to
- *            this domain.
+/* The colour maps a radar console needs, in the MATLAB vocabulary an engineer
+ * already has, plus two specific to this domain (phosphor, amber).
  *
- *            Each map is a 256-entry lookup built once at start-up by
- *            piecewise-linear interpolation of published control points, so the
- *            image blitter's inner loop is a single indexed fetch.
- *
- *  Language: ISO C17
- * ========================================================================== */
+ * Each map is a 256-entry lookup built once at start-up by piecewise-linear
+ * interpolation of published control points, so the image blitter's inner loop
+ * is a single indexed fetch.
+ */
 #ifndef PWRADAR_UI_COLORMAP_H
 #define PWRADAR_UI_COLORMAP_H
 

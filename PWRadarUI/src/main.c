@@ -1,25 +1,16 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarUI
- *  ------------------------------------------------------------------------
- *  File    : main.c
- *  Purpose : Entry point for the verification console.
+/* Entry point for the verification console.
  *
- *  Command line
- *  ------------
- *      --selftest      run the PWRadarCore acceptance suite and exit with a
- *                      non-zero status on any failure (for a CI gate)
- *      --scenario N    load canned scenario N at start-up
- *      --capture N F   let the scenario run for N frames, write the framebuffer
- *                      to F as a binary PPM and exit (headless CI / reference
- *                      imaging; needs no image library)
- *      --version       print the core version and exit
- *      --help          usage
+ *   --selftest       run the PWRadarCore acceptance suite and exit non-zero on
+ *                    any failure (CI gate)
+ *   --scenario N     load canned scenario N at start-up
+ *   --capture N F    run N frames, write the framebuffer to F as a binary PPM
+ *                    and exit (headless regression imaging, no image library)
+ *   --version        print the core version and exit
+ *   --help           usage
  *
- *  On Windows the executable is linked as a console subsystem application so
- *  that --selftest output is visible; the window is created regardless.
- *
- *  Language: ISO C17
- * ========================================================================== */
+ * On Windows this links as a console subsystem application so --selftest output
+ * is visible; the window is created either way.
+ */
 #include "ui_app.h"
 
 #include <stdio.h>

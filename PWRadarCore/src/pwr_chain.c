@@ -1,27 +1,16 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarCore (internal)
- *  ------------------------------------------------------------------------
- *  File    : pwr_chain.c
- *  Purpose : The coherent signal-processing chain.
+/* The coherent chain: pulse compression -> MTI -> Doppler filter bank ->
+ * display products.
  *
- *      pulse compression  ->  MTI  ->  Doppler filter bank  ->  products
+ * The simulator injects thermal noise with variance exactly 1.0 per complex
+ * sample and this chain carries that reference forward, so the published
+ * range-Doppler map is already in dB of SNR: the noise floor sits at 0 dB and
+ * a target reading +18 dB really has 18 dB post-integration. Nothing
+ * downstream has to rescale, and the display doubles as an SNR meter.
  *
- *  Calibration
- *  -----------
- *  The simulator injects thermal noise with variance exactly 1.0 per complex
- *  sample.  The chain carries that reference forward so that the published
- *  range-Doppler map is expressed directly in dB of signal-to-noise ratio:
- *  the noise floor sits at 0 dB and a target that reads +18 dB really has
- *  18 dB of post-integration SNR.  Every threshold, detection and track
- *  quality figure downstream therefore needs no further scaling, and the
- *  operator can read the display as an SNR meter.
- *
- *  The two normalising constants are
- *      sigma_pc     = sqrt( ENBW(range window) / Ntx )      after compression
- *      doppler_norm = 1 / ( sigma_pc * sqrt( sum(w_d^2) ) ) after the FFT
- *
- *  Language: ISO C17
- * ========================================================================== */
+ * Two constants hold that up:
+ *   sigma_pc     = sqrt(ENBW(range window) / Ntx)     after compression
+ *   doppler_norm = 1 / (sigma_pc * sqrt(sum w_d^2))   after the FFT
+ */
 #include "pwr_core.h"
 
 #include <string.h>

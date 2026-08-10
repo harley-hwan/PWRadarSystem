@@ -1,29 +1,20 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarUI
- *  ------------------------------------------------------------------------
- *  File    : ui_widget.h
- *  Purpose : The control set: buttons, toggles, check boxes, radio groups,
- *            sliders, numeric edit fields, drop-downs, tab bars, scroll bars,
- *            draggable splitters, group panels and a sortable data table.
+/* The control set: buttons, toggles, check boxes, radio groups, sliders,
+ * numeric edit fields, drop-downs, tab bars, scroll bars, draggable splitters,
+ * group panels and a sortable data table.
  *
- *  Model
- *  -----
- *  Immediate mode with stable identities.  A widget is a function call that
- *  both draws and returns its interaction result, while the small amount of
- *  state that must persist between frames - which widget is hot, which is
- *  active, which has keyboard focus, the text being edited, the open drop-down
- *  - lives in UI_Context keyed by a hashed identity.  For a console whose
- *  layout is computed from the live radar configuration every frame this is far
- *  less machinery than a retained widget tree, and it cannot get out of sync
- *  with the data it displays.
+ * Immediate mode with stable identities. A widget is a function call that both
+ * draws and returns its interaction result; the little state that must persist
+ * between frames - which widget is hot, active or focused, the text being
+ * edited, the open drop-down - lives in UI_Context keyed by a hashed identity.
+ * For a console whose layout is recomputed from the live configuration every
+ * frame that is far less machinery than a retained widget tree, and it cannot
+ * get out of sync with the data it shows.
  *
- *  A drop-down needs to paint over widgets declared after it, so its input is
- *  handled at the top of the frame from the previous frame's geometry and its
- *  painting is deferred to ui_frame_end().  That is the only ordering subtlety
- *  in the whole layer.
- *
- *  Language: ISO C17
- * ========================================================================== */
+ * A drop-down has to paint over widgets declared after it, so its input is
+ * handled at the top of the frame from the previous frame's geometry and its
+ * painting is deferred to ui_frame_end(). That is the only ordering subtlety
+ * in the layer.
+ */
 #ifndef PWRADAR_UI_WIDGET_H
 #define PWRADAR_UI_WIDGET_H
 

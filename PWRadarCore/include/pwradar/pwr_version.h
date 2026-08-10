@@ -1,15 +1,4 @@
-/* ==========================================================================
- *  PWRadarSystem - PW (Pulsed Waveform) Radar Detection System
- *  ------------------------------------------------------------------------
- *  File     : pwr_version.h
- *  Module   : PWRadarCore (public)
- *  Purpose  : Library / ABI version identification.
- *
- *  Language : ISO C17 (freestanding of any third-party dependency)
- *  Platforms: Windows (MSVC v143, x64) / Linux (GCC, Clang)
- *
- *  (c) PWRadarSystem project. All rights reserved.
- * ========================================================================== */
+/* Library and ABI version. */
 #ifndef PWRADAR_PWR_VERSION_H
 #define PWRADAR_PWR_VERSION_H
 

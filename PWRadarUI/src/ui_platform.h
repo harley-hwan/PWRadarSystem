@@ -1,25 +1,15 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarUI
- *  ------------------------------------------------------------------------
- *  File    : ui_platform.h
- *  Purpose : The whole operating-system surface of the console, and nothing
- *            more: one window, an input queue, and a 32-bit framebuffer that
- *            gets blitted.  Every pixel above this layer is produced by the
- *            software renderer in ui_gfx.c, so Windows and Linux render
- *            identically down to the pixel.
+/* The whole operating-system surface of the console and nothing more: one
+ * window, an input queue, and a 32-bit framebuffer that gets blitted. Every
+ * pixel above this layer comes from the software renderer in ui_gfx.c, so
+ * Windows and Linux render identically down to the pixel.
  *
- *            Windows implementation: ui_platform_win32.c  (user32 + gdi32)
- *            Linux   implementation: ui_platform_x11.c    (libX11)
+ * Windows: ui_platform_win32.c (user32 + gdi32).  Linux: ui_platform_x11.c
+ * (libX11).
  *
- *  Pixel format
- *  ------------
- *  One uint32_t per pixel, 0xAARRGGBB in host byte order.  That is byte order
- *  B,G,R,A in memory on little-endian, which is exactly what a Win32 BI_RGB
- *  DIB and an X11 24/32-bit TrueColor visual both expect, so no conversion
- *  happens on either platform.
- *
- *  Language: ISO C17
- * ========================================================================== */
+ * One uint32_t per pixel, 0xAARRGGBB in host byte order - that is B,G,R,A in
+ * memory on little-endian, which is exactly what a Win32 BI_RGB DIB and an X11
+ * 24/32-bit TrueColor visual both expect, so neither platform converts.
+ */
 #ifndef PWRADAR_UI_PLATFORM_H
 #define PWRADAR_UI_PLATFORM_H
 

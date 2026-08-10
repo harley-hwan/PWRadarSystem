@@ -1,13 +1,7 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarCore
- *  ------------------------------------------------------------------------
- *  File    : pwr_scenario.c
- *  Purpose : Canned verification scenarios.  Each one isolates a specific
- *            behaviour a PW radar processor has to be checked against, so the
- *            operator can walk the whole acceptance list from the console
- *            without editing a scenario file.
- *  Language: ISO C17
- * ========================================================================== */
+/* Canned verification scenarios. Each isolates one behaviour a PW radar
+ * processor has to be checked against, so the whole acceptance list can be
+ * walked from the console without editing a scenario file.
+ */
 #include "pwr_core.h"
 
 #include <stdio.h>

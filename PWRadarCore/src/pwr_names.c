@@ -1,10 +1,6 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarCore
- *  File    : pwr_names.c
- *  Purpose : Human-readable names for every public status code and enumeration
- *            so the presentation layer never has to duplicate the tables.
- *  Language: ISO C17
- * ========================================================================== */
+/* Human-readable names for the public status codes and enumerations, so the
+ * presentation layer never duplicates the tables.
+ */
 #include "pwr_core.h"
 
 PWR_EXPORT(const char*) pwr_status_string(PWR_Status status)

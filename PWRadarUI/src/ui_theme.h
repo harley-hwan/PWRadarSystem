@@ -1,18 +1,10 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarUI
- *  ------------------------------------------------------------------------
- *  File    : ui_theme.h
- *  Purpose : One place for every colour and metric the console uses, so the
- *            whole surface stays visually consistent and can be re-skinned by
- *            editing a single header.
+/* Every colour and metric the console uses, in one place, so the surface stays
+ * consistent and can be re-skinned by editing this header.
  *
- *  The palette is a dark instrumentation scheme: a near-black desk, cool grey
- *  chrome, and saturated accents reserved for meaning (amber = tentative,
- *  green = confirmed, cyan = detections, red = alarms).  Data ink is never
- *  spent on decoration.
- *
- *  Language: ISO C17
- * ========================================================================== */
+ * A dark instrumentation scheme: near-black desk, cool grey chrome, saturated
+ * accents reserved for meaning (amber = tentative, green = confirmed, cyan =
+ * detections, red = alarms). Data ink is never spent on decoration.
+ */
 #ifndef PWRADAR_UI_THEME_H
 #define PWRADAR_UI_THEME_H
 

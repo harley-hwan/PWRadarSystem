@@ -1,9 +1,5 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarCore (internal)
- *  File    : pwr_platform.c
- *  Purpose : Win32 / POSIX implementation of the platform abstraction.
- *  Language: ISO C17
- * ========================================================================== */
+/* Win32 and POSIX implementations of the platform abstraction. */
+
 /* Feature-test macros must precede every system header so that the POSIX
  * threading, monotonic-clock and aligned-allocation declarations are visible
  * even under a strict `-std=c17` (no `-std=gnu17`) compilation. */

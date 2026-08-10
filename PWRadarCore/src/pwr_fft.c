@@ -1,27 +1,21 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarCore (internal)
- *  File    : pwr_fft.c
- *  Language: ISO C17
+/* Why the radix-4 stage reads its two middle operands swapped.
  *
- *  Correctness argument for the mixed radix-2 / radix-4 schedule
- *  ------------------------------------------------------------
- *  Two cascaded radix-2 DIT stages operating on bit-reversed data at
- *  half-lengths h and 2h produce, for A=d[b+j], B=d[b+j+h], C=d[b+j+2h],
- *  D=d[b+j+3h] and w1 = W_4h^j, w2 = w1^2, w3 = w1^3:
+ * Two cascaded radix-2 DIT stages on bit-reversed data at half-lengths h and
+ * 2h produce, for A=d[b+j], B=d[b+j+h], C=d[b+j+2h], D=d[b+j+3h] and
+ * w1 = W_4h^j, w2 = w1^2, w3 = w1^3:
  *
- *      out[j]    = A + w2*B + w1*C + w3*D
- *      out[j+h]  = A - w2*B - i*(w1*C - w3*D)
- *      out[j+2h] = A + w2*B - w1*C - w3*D
- *      out[j+3h] = A - w2*B + i*(w1*C - w3*D)
+ *     out[j]    = A + w2*B + w1*C + w3*D
+ *     out[j+h]  = A - w2*B - i*(w1*C - w3*D)
+ *     out[j+2h] = A + w2*B - w1*C - w3*D
+ *     out[j+3h] = A - w2*B + i*(w1*C - w3*D)
  *
- *  A single radix-4 butterfly reproduces exactly this if the DFT-4 inputs are
- *  taken as (A, C, B, D) - i.e. the two middle operands are exchanged, which
- *  is precisely the base-4 digit reversal that bit reversal leaves behind.
- *  The stage below therefore loads t1 from the +2h slot and t2 from the +h
- *  slot.  This makes the radix-4 path bit-exact-equivalent (up to floating
- *  point summation order) to the pure radix-2 reference, which the built-in
- *  self test verifies against a direct DFT.
- * ========================================================================== */
+ * One radix-4 butterfly reproduces that exactly if the DFT-4 inputs are taken
+ * as (A, C, B, D) - the two middle operands exchanged, which is the base-4
+ * digit reversal bit reversal leaves behind. Hence t1 loads from the +2h slot
+ * and t2 from the +h slot below. Without the exchange the transform is simply
+ * wrong: the outputs are neither the right bins nor a reordering of them. The
+ * self test checks the result against a direct DFT.
+ */
 #include "pwr_fft.h"
 
 #include <stdlib.h>

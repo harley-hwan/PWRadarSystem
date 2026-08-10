@@ -1,41 +1,25 @@
-/* ==========================================================================
- *  PWRadarSystem - PWRadarCore (internal)
- *  ------------------------------------------------------------------------
- *  File    : pwr_cfar.c
- *  Purpose : Constant-false-alarm-rate detection on the range-Doppler map and
- *            conversion of the resulting cell mask into plot reports.
+/* CFAR detection on the range-Doppler map, and the conversion of the resulting
+ * cell mask into plot reports.
  *
- *  Reference window geometry
- *  -------------------------
- *      Hr = guard_range   + train_range      (outer half width, range)
- *      Hd = guard_doppler + train_doppler    (outer half width, Doppler)
- *  Training cells are those inside the outer rectangle and outside the guard
- *  rectangle.  The range axis is clamped at the map edges; the Doppler axis
- *  *wraps*, which is physically correct because the Doppler spectrum is
- *  periodic in the PRF.
+ * Reference window: Hr = guard_range + train_range, Hd = guard_doppler +
+ * train_doppler. Training cells are inside the outer rectangle and outside the
+ * guard rectangle. The range axis clamps at the map edges; the Doppler axis
+ * wraps, which is physically right because the spectrum is periodic in the PRF.
  *
- *  Estimator families
- *  ------------------
- *    CA / GOCA / SOCA : full two-dimensional window, evaluated in O(Hd) per
- *                       cell from per-row prefix sums along range.
- *    OS / TM          : one-dimensional window along range only.  This is the
- *                       usual engineering choice - a full 2-D ordered
- *                       statistic would need a few hundred samples ranked per
- *                       cell, which no real-time processor does - and it is
- *                       also where OS-CFAR earns its keep, namely resolving
- *                       closely spaced targets in range.
+ * CA/GOCA/SOCA use the full 2-D window, evaluated from per-row prefix sums
+ * along range. OS/TM use a 1-D window along range only: a full 2-D ordered
+ * statistic would need hundreds of samples ranked per cell, which no real-time
+ * processor does, and range is where OS earns its keep anyway (closely spaced
+ * targets).
  *
- *  Threshold multipliers (square-law detector, exponentially distributed
- *  clutter+noise power):
- *      CA  :  alpha = N * ( Pfa^(-1/N) - 1 )
- *      OS  :  Pfa   = prod_{i=0}^{k-1} (N-i) / (N-i+alpha)   solved by
- *             bisection, which is exact for the k-th ranked cell.
- *      TM  :  CA form with the effective count after trimming.
- *      GO  :  CA form on the half window at Pfa/2 (standard approximation).
- *      SO  :  CA form on the half window at Pfa   (optimistic, documented).
- *
- *  Language: ISO C17
- * ========================================================================== */
+ * Threshold multipliers, square-law detector, exponential clutter+noise power:
+ *   CA   alpha = N * (Pfa^(-1/N) - 1)
+ *   OS   Pfa = prod_{i<k} (N-i)/(N-i+alpha), solved by bisection - exact for
+ *        the k-th ranked cell
+ *   TM   CA form on the count left after trimming
+ *   GO   CA form on the half window at Pfa/2 (standard approximation)
+ *   SO   CA form on the half window at Pfa (optimistic)
+ */
 #include "pwr_core.h"
 
 #include <stdlib.h>
