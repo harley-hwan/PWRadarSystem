@@ -132,7 +132,6 @@ PWR_EXPORT(PWR_Status) pwr_sim_environment_default(PWR_SimEnvironment* env)
     if (env == NULL) { return PWR_ERR_NULL_POINTER; }
     memset(env, 0, sizeof(*env));
     env->sea_state             = 2.0;
-    env->land_clutter_rcs_dbsm = -20.0;
     env->clutter_to_noise_db   = 20.0;
     env->clutter_spread_hz     = 12.0;
     env->rain_rate_mmph        = 0.0;

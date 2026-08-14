@@ -83,6 +83,11 @@ typedef struct PWR_CfarWork
 {
     uint8_t*  hit;                /* [n_doppler*n_range] 1 == above threshold */
     pwr_real* threshold;          /* [n_doppler*n_range] linear power         */
+    /* Local estimate of the interference mean in each cell, unbiased across
+     * the estimator families.  Plot SNR is measured against this rather than
+     * against a global noise floor, so it stays honest under the MTI filter's
+     * Doppler-shaped noise, the STC ramp, transmit eclipsing and clutter. */
+    pwr_real* noise_est;          /* [n_doppler*n_range] linear power         */
     double*   integral;           /* [n_doppler*(n_range+1)] per-row prefix sums */
     /* Sliding Doppler-window sums for the CA family: win_psum is the prefix
      * row summed over all 2*Hd+1 window rows, gband_psum the same over the
@@ -92,6 +97,22 @@ typedef struct PWR_CfarWork
     double*   gband_psum;         /* [n_range+1]                              */
     pwr_real* train_scratch;      /* [max_train_cells] for OS / TM            */
     uint32_t  train_capacity;
+    /* Threshold-multiplier memo, indexed by reference-cell count.  Two of the
+     * five families solve their exact false-alarm expression by bisection, so
+     * this must persist across CPIs rather than being rebuilt per run: the
+     * count takes only a handful of distinct values, varying solely at the map
+     * edges, and a change to any parameter alpha was solved for clears it. */
+    double*   alpha_tab;          /* [alpha_cap]                              */
+    double*   bias_tab;           /* [alpha_cap] mean-unbiasing divisor        */
+    uint8_t*  alpha_set;          /* [alpha_cap]                              */
+    double*   so_scratch;         /* [2*alpha_cap] GO / SO weight series       */
+    uint32_t  alpha_cap;
+    double    tuned_pfa;
+    int32_t   tuned_type;
+    int32_t   tuned_os_rank;
+    int32_t   tuned_trim_low;
+    int32_t   tuned_trim_high;
+    int32_t   tuned_valid;
     uint32_t  cells_tested;
     uint32_t  cells_hit;
 } PWR_CfarWork;
@@ -124,7 +145,6 @@ typedef struct PWR_TrackInternal
     double  P[16];                /* 4x4 covariance, row major                */
     double  last_predict_time_s;
     double  last_meas_time_s;
-    double  score;                /* log-likelihood-ratio style track score   */
     uint32_t id;
     uint32_t hits;
     uint32_t misses;
@@ -388,6 +408,13 @@ struct PWR_Engine
 void pwr_log(struct PWR_Engine* e, PWR_LogLevel lvl, const char* fmt, ...);
 void pwr_set_error(struct PWR_Engine* e, const char* fmt, ...);
 
+/* --- sensitivity time control -------------------------------------------- */
+/** Amplitude gain the STC attenuator applies to energy arriving from
+ *  @p range_m; unity while the control is off.  The per-bin ramp in
+ *  PWR_Engine::stc_gain is built from this, so echo and clutter always see the
+ *  same law. */
+double pwr_stc_gain_at(const struct PWR_Engine* e, double range_m);
+
 /* --- simulator ---------------------------------------------------------- */
 PWR_Status pwr_sim_init(PWR_Simulator* s, const PWR_RadarConfig* cfg,
                         uint32_t n_cells);
@@ -406,6 +433,11 @@ void       pwr_sim_add_clutter(struct PWR_Engine* e);
 
 /* --- signal chain ------------------------------------------------------- */
 void       pwr_chain_pulse_compress(struct PWR_Engine* e);
+
+/** Pre-MTI incoherent average for the "raw video" A-scope trace.  Must run
+ *  after pwr_sim_add_clutter(), or the trace shows none of the clutter. */
+void       pwr_chain_raw_profile(struct PWR_Engine* e);
+
 void       pwr_chain_mti(struct PWR_Engine* e);
 void       pwr_chain_doppler(struct PWR_Engine* e);
 void       pwr_chain_products(struct PWR_Engine* e);

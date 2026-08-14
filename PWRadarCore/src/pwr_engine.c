@@ -234,9 +234,29 @@ static void pwr_engine_compute_dims(PWR_Engine* e)
     }
 }
 
-/* Rebuilds the R^2 sensitivity-time-control ramp for the current geometry.
- * Shared by the calibration refresh and pwr_engine_set_stc() so the two can
- * never drift apart. */
+/* Sensitivity-time-control amplitude gain at a slant range.
+ *
+ * An analogue STC ramp is an attenuator ahead of the receiver, so this is the
+ * factor that applies to everything arriving from that range - target echo and
+ * surface clutter alike - and never to the receiver's own thermal noise.  The
+ * amplitude law is R^2, i.e. R^4 in power, which is exactly what flattens the
+ * range dependence of the radar equation across the near-in gates.
+ *
+ * Single source of truth: the per-bin ramp below and the per-target scalar the
+ * echo injector uses both come from here, so the two can never drift apart.
+ * Returns unity while the control is off, which is what lets the clutter
+ * injector multiply by the ramp unconditionally. */
+double pwr_stc_gain_at(const struct PWR_Engine* e, double range_m)
+{
+    double g;
+    if (e == NULL || e->cfg.enable_stc == 0) { return 1.0; }
+    if (!(e->cfg.stc_range_m > 1.0))         { return 1.0; }
+    g = (range_m / e->cfg.stc_range_m) * (range_m / e->cfg.stc_range_m);
+    return pwr_clampd(g, 1.0e-3, 1.0);
+}
+
+/* Rebuilds the per-range-bin STC ramp for the current geometry.  Shared by the
+ * calibration refresh and pwr_engine_set_stc(). */
 static void pwr_engine_update_stc_gain(PWR_Engine* e)
 {
     uint32_t i;
@@ -244,13 +264,7 @@ static void pwr_engine_update_stc_gain(PWR_Engine* e)
     for (i = 0u; i < e->n_range; ++i)
     {
         const double r = e->axis_range_first_m + (double)i * e->axis_range_step_m;
-        double g = 1.0;
-        if (e->cfg.stc_range_m > 1.0)
-        {
-            g = (r / e->cfg.stc_range_m) * (r / e->cfg.stc_range_m);
-            g = pwr_clampd(g, 1.0e-3, 1.0);
-        }
-        e->stc_gain[i] = (pwr_real)g;
+        e->stc_gain[i] = (pwr_real)pwr_stc_gain_at(e, r);
     }
 }
 
@@ -379,6 +393,28 @@ static PWR_Status pwr_engine_alloc_buffers(PWR_Engine* e)
     return PWR_STATUS_OK;
 }
 
+/* Reports a geometry that has left the coherent-dwell validity envelope.
+ *
+ * pulses_per_beamwidth is how many pulses the antenna puts on a target while
+ * the mainlobe crosses it.  A CPI longer than that spreads one coherent batch
+ * over more than a beamwidth: the coherent integration gain the metrics
+ * advertise is not achieved, the beam-shape modulation the plot extractor's
+ * azimuth centroid depends on is smeared away, and the Doppler filter bank
+ * sees scan modulation it was not sized for.  That is a validity limit, not an
+ * invalid configuration - a staring or slowly rotating radar is unaffected and
+ * the operator may well want the trade - so it is reported, never rejected. */
+static void pwr_engine_check_dwell(PWR_Engine* e)
+{
+    if (!(e->dm.scan_period_s > 0.0)) { return; }
+    if ((double)e->cfg.pulses_per_cpi <= e->dm.pulses_per_beamwidth) { return; }
+    pwr_log(e, PWR_LOG_WARN,
+            "CPI of %u pulses exceeds the %.1f pulses the beam dwells on a "
+            "target (%.2f deg beam at %.1f rpm): coherent gain and azimuth "
+            "centroiding are both degraded",
+            e->cfg.pulses_per_cpi, e->dm.pulses_per_beamwidth,
+            e->cfg.azimuth_beamwidth_deg, e->cfg.scan_rate_rpm);
+}
+
 /* ==========================================================================
  *  Frame publication
  * ========================================================================== */
@@ -448,6 +484,10 @@ void pwr_frame_publish(struct PWR_Engine* e)
     {
         uint32_t out = 0u;
         uint32_t confirmed = 0u;
+        uint32_t active = 0u;
+        /* A retired track is published once in PWR_TRACK_TERMINATED before its
+         * slot is released, so a consumer sees an explicit end-of-track; it is
+         * not counted as active. */
         for (i = 0u; i < PWR_MAX_TRACKS; ++i)
         {
             const PWR_TrackInternal* tk = &e->tracker.tracks[i];
@@ -491,12 +531,13 @@ void pwr_frame_publish(struct PWR_Engine* e)
             dst->trail_count       = tk->trail_count;
             dst->trail_head        = tk->trail_head;
             memcpy(dst->trail, tk->trail, sizeof(dst->trail));
-            if (tk->state == PWR_TRACK_CONFIRMED) { ++confirmed; }
+            if (tk->state == PWR_TRACK_CONFIRMED)  { ++confirmed; }
+            if (tk->state != PWR_TRACK_TERMINATED) { ++active; }
             if (out >= PWR_MAX_TRACKS) { break; }
         }
         h->tracks      = fs->tracks;
         h->track_count = out;
-        e->stats.tracks_active    = out;
+        e->stats.tracks_active    = active;
         e->stats.tracks_confirmed = confirmed;
     }
 
@@ -625,6 +666,7 @@ static void pwr_engine_process_cpi(PWR_Engine* e)
     t0 = t1;
     pwr_chain_pulse_compress(e);
     pwr_sim_add_clutter(e);
+    pwr_chain_raw_profile(e);
     t1 = pwr_plat_now_s();
     e->stats.t_pulse_compress_ms =
         pwr_ewma(e->stats.t_pulse_compress_ms, (t1 - t0) * 1e3, alpha);
@@ -780,6 +822,7 @@ static void pwr_engine_apply_pending_locked(PWR_Engine* e)
         e->cfg.scan_rate_rpm = scan_rpm;
         (void)pwr_config_derive(&e->cfg, &e->dm);
         e->dm.range_bins = e->n_range;
+        pwr_engine_check_dwell(e);
     }
     if ((flags & PWR_PENDING_STC) != 0u)
     {
@@ -963,6 +1006,8 @@ PWR_EXPORT(PWR_Status) pwr_engine_create(const PWR_RadarConfig* cfg,
 
     st = pwr_engine_alloc_buffers(e);
     if (st != PWR_STATUS_OK) { pwr_engine_destroy(e); return st; }
+
+    pwr_engine_check_dwell(e);
 
     if (e->cfg.worker_thread != 0)
     {
@@ -1242,6 +1287,7 @@ PWR_EXPORT(PWR_Status) pwr_engine_reconfigure(PWR_Engine* eng,
             needs_realloc, waveform_dirty, eng->n_range, eng->n_doppler,
             eng->wf.sidelobe_db, eng->wf.mainlobe_bins,
             eng->wf.mismatch_loss_db, eng->sigma_pc);
+    pwr_engine_check_dwell(eng);
     return PWR_STATUS_OK;
 }
 

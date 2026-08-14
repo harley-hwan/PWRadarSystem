@@ -129,9 +129,16 @@ static void pwr_sc_resolution(PWR_Engine* e)
     pwr_env(e, 0, 0.0, 0, 0);
     (void)pwr_engine_get_metrics(e, &dm);
     dr = dm.range_resolution_m;
-    pwr_add_polar(e, "PAIR-A", 90.0, 12000.0,          2000.0, 90.0, 0.0,
+    /* Both members of the range pair open on the same bearing at the same
+     * speed, so they stay 1.2 cells apart and share one Doppler bin - which is
+     * what makes this a *range* resolution test.  The speed has to be non-zero:
+     * a stationary pair lands in the zero-Doppler notch the default CFAR
+     * censors and neither target is ever detected, so the pair could not
+     * exercise the resolution it exists to check.  60 m/s is clear of the notch
+     * and well inside the unambiguous interval. */
+    pwr_add_polar(e, "PAIR-A", 90.0, 12000.0,          2000.0, 90.0, 60.0,
                   5.0, PWR_SWERLING_0, PWR_CLASS_AIR);
-    pwr_add_polar(e, "PAIR-B", 90.0, 12000.0 + 1.2*dr, 2000.0, 90.0, 0.0,
+    pwr_add_polar(e, "PAIR-B", 90.0, 12000.0 + 1.2*dr, 2000.0, 90.0, 60.0,
                   5.0, PWR_SWERLING_0, PWR_CLASS_AIR);
     /* Same range, different Doppler: the range-Doppler separation check. */
     pwr_add_polar(e, "DOPP-C", 270.0, 12000.0, 2000.0,  90.0, 120.0,
@@ -147,9 +154,20 @@ static void pwr_sc_resolution(PWR_Engine* e)
 static void pwr_sc_crossing(PWR_Engine* e)
 {
     pwr_env(e, 1, 14.0, 0, 0);
+    /* All three reach (0, 12000) together at t = 93.3 s, which is the crossing
+     * the association logic is under test at.
+     *
+     * CROSS-B closes head-on, so its radial rate is its whole speed, and that
+     * makes it the one target in the set whose speed has to be chosen with the
+     * Doppler ambiguity in mind: at 150 m/s it would sit within 3 m/s of the
+     * first blind speed (lambda*PRF/2 = 147.4 m/s), fold onto the zero-Doppler
+     * column and be deleted by the CFAR notch the default configuration
+     * censors - permanently invisible, turning the three-way crossing into a
+     * two-way one.  120 m/s folds clear of the notch; the start range is set
+     * so the rendezvous time is unchanged. */
     pwr_add(e, "CROSS-A", -14000.0, 12000.0, 3000.0,  150.0,    0.0, 0.0,
             8.0, PWR_SWERLING_1, PWR_CLASS_AIR);
-    pwr_add(e, "CROSS-B",      0.0, 26000.0, 3050.0,    0.0, -150.0, 0.0,
+    pwr_add(e, "CROSS-B",      0.0, 23200.0, 3050.0,    0.0, -120.0, 0.0,
             8.0, PWR_SWERLING_1, PWR_CLASS_AIR);
     pwr_add(e, "CROSS-C",  14000.0, 12000.0, 2900.0, -150.0,    0.0, 0.0,
             8.0, PWR_SWERLING_1, PWR_CLASS_AIR);
@@ -204,9 +222,17 @@ static void pwr_sc_ecm(PWR_Engine* e)
 static void pwr_sc_range_walk(PWR_Engine* e)
 {
     pwr_env(e, 1, 12.0, 0, 0);
-    pwr_add_polar(e, "WALK-01", 0.0, 2000.0, 2500.0, 0.0, 200.0,
+    /* Altitude is deliberately low.  pwr_add_polar() takes a *ground* range,
+     * and the elevation pattern is a Gaussian pinned to the horizon with no
+     * tilt and no cosecant-squared fill, so a target that starts 2 km out at
+     * airway altitude sits above 50 degrees elevation and is rejected by the
+     * pattern - it would only appear several seconds later, at a range set by
+     * the beam edge rather than by the radar equation, which is exactly the
+     * comparison this scenario exists to make.  At 200 m the walk begins at
+     * 5 degrees elevation and stays inside the beam all the way out. */
+    pwr_add_polar(e, "WALK-01", 0.0, 2000.0, 200.0, 0.0, 200.0,
                   1.0, PWR_SWERLING_1, PWR_CLASS_AIR);
-    pwr_add_polar(e, "WALK-02", 180.0, 2000.0, 2500.0, 180.0, 200.0,
+    pwr_add_polar(e, "WALK-02", 180.0, 2000.0, 200.0, 180.0, 200.0,
                   10.0, PWR_SWERLING_1, PWR_CLASS_AIR);
 }
 

@@ -34,18 +34,36 @@
 /* ==========================================================================
  *  Antenna pattern
  * ==========================================================================
- *  Gaussian approximation of the one-way power pattern:
+ *  Gaussian approximation of the one-way power pattern inside the mainlobe:
  *      G(th)/G0 = exp( -2.7726 * (th / th_3dB)^2 )
  *  which is exactly -3 dB at th = th_3dB/2.  Two-way response is the square.
- *  A -45 dB floor stands in for the sidelobe structure so that a strong
- *  jammer or a large ship is still visible off boresight, as in reality.
+ *
+ *  The Gaussian is only meaningful across the mainlobe; past the point where
+ *  it has fallen to PWR_SIDELOBE_FLOOR the response crosses over to a 1/th^2
+ *  envelope anchored at that level, which is the decay a real aperture's
+ *  sidelobe peaks follow.  A *flat* floor instead - which is what this used to
+ *  be - gives a jammer the same response at 5 degrees as at 180, and paints a
+ *  uniform ring of sidelobe plots around any large close target.  The two
+ *  constants below are a matched pair: the Gaussian passes through the floor
+ *  at the knee, so the pattern is continuous to within a thousandth of a dB.
+ *
+ *  This is a smooth envelope, not a structured pattern: there are no discrete
+ *  sidelobe peaks, no nulls and no backlobe, so it supports a sidelobe *level*
+ *  argument but not sidelobe blanking or cancellation.
  * ------------------------------------------------------------------------ */
+#define PWR_SIDELOBE_FLOOR        3.16228e-5   /* -45 dB, one way             */
+#define PWR_SIDELOBE_KNEE_BW      1.933116     /* beamwidths to the floor     */
+
 static double pwr_pattern_oneway(double offset_deg, double bw_deg)
 {
-    double g;
+    double u;
     if (!(bw_deg > 0.0)) { return 1.0; }
-    g = exp(-2.7726 * (offset_deg / bw_deg) * (offset_deg / bw_deg));
-    return (g < 3.16e-5) ? 3.16e-5 : g;      /* -45 dB sidelobe floor */
+    u = fabs(offset_deg) / bw_deg;
+    if (u <= PWR_SIDELOBE_KNEE_BW) { return exp(-2.7726 * u * u); }
+    {
+        const double k = PWR_SIDELOBE_KNEE_BW / u;
+        return PWR_SIDELOBE_FLOOR * k * k;
+    }
 }
 
 /* ==========================================================================
@@ -331,7 +349,13 @@ void pwr_sim_generate_cpi(struct PWR_Engine* e)
         el_gain = pwr_pattern_oneway(g.elevation_deg,
                                      cfg->elevation_beamwidth_deg);
         pat2    = (az_gain * el_gain) * (az_gain * el_gain);   /* two-way */
-        if (pat2 < 1.0e-9) { continue; }
+        /* Cheap early-out for a contribution that can never reach the
+         * detector.  It has to sit well below the sidelobe floor's own
+         * two-way value (1.0e-9): a guard at that level would reject the
+         * whole sidelobe region, which is what used to make the floor
+         * unreachable for echoes.  The real cull is the amplitude test after
+         * the link budget, which is still ahead of the per-pulse loop. */
+        if (pat2 < 1.0e-16) { continue; }
 
         /* -- Swerling fluctuation ----------------------------------------- */
         if (pwr_swerling_is_pulse_to_pulse(tg->swerling) == 0)
@@ -352,6 +376,7 @@ void pwr_sim_generate_cpi(struct PWR_Engine* e)
             const PWR_Complex sum = pwr_cadd(pwr_c(1.0f, 0.0f),
                                      pwr_cscale(pwr_cexpj(dphi),
                                                 (pwr_real)PWR_SEA_REFLECTION));
+            /* One-way voltage propagation factor F = |1 + rho*exp(j*dphi)|. */
             mp_gain = (double)pwr_cabs(sum);
             mp_gain = pwr_clampd(mp_gain, 0.0, 2.0);
         }
@@ -361,7 +386,19 @@ void pwr_sim_generate_cpi(struct PWR_Engine* e)
                                         g.slant_range_m);
         snr_db += 10.0 * log10(pat2);
         snr_lin = pwr_db_to_pow(snr_db);
-        amp     = sqrt(snr_lin) * amp_ref * st->amp_scale * mp_gain;
+        /* The monostatic path traverses the interference pattern twice, so
+         * received power carries F^4 and the amplitude F^2 - exactly as the
+         * one-way antenna pattern is squared into pat2 above.  Charging F once
+         * would halve every lobing null and peak in dB. */
+        amp     = sqrt(snr_lin) * amp_ref * st->amp_scale * (mp_gain * mp_gain);
+        /* Sensitivity time control is an attenuator ahead of the receiver: it
+         * acts on everything arriving from a range gate - echo and clutter
+         * alike - and never on the receiver's own thermal noise.  Applying it
+         * here, and to the clutter injection, rather than to the compressed
+         * cube is what makes it preserve signal-to-clutter ratio while
+         * charging the near-in signal-to-noise ratio, which is the entire
+         * point of the control. */
+        amp    *= pwr_stc_gain_at(e, g.slant_range_m);
         if (!(amp > 1.0e-9)) { continue; }
 
         /* -- delay, delay rate and Doppler ------------------------------- */
@@ -469,6 +506,7 @@ void pwr_sim_add_clutter(struct PWR_Engine* e)
 
     if (s->env.enable_sea_clutter == 0 && s->env.enable_rain == 0) { return; }
     if (s->clutter_power == NULL || s->clutter_cells < n_range)    { return; }
+    if (e->stc_gain == NULL)                                       { return; }
 
     pwr_sim_build_clutter_profile(s, e);
 
@@ -486,7 +524,11 @@ void pwr_sim_add_clutter(struct PWR_Engine* e)
                                                 beta * (double)n1.re);
             s->clutter_state[i].im = (pwr_real)(rho * (double)s->clutter_state[i].im +
                                                 beta * (double)n1.im);
-            a = sqrt(pw) * scale;
+            /* Clutter arrives through the same attenuator the echo does, so it
+             * carries the STC ramp too - which is what makes the control
+             * suppress near-in clutter instead of merely desensitising the
+             * receiver.  e->stc_gain is all ones while STC is off. */
+            a = sqrt(pw) * scale * (double)e->stc_gain[i];
             row[i].re += (pwr_real)(a * (double)s->clutter_state[i].re);
             row[i].im += (pwr_real)(a * (double)s->clutter_state[i].im);
         }

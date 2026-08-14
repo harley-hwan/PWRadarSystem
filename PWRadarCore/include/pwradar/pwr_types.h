@@ -127,7 +127,12 @@ typedef enum PWR_TargetClass
     PWR_CLASS_COUNT
 } PWR_TargetClass;
 
-/** Track life-cycle state (standard M/N confirmation logic). */
+/** Track life-cycle state (standard M/N confirmation logic).
+ *
+ *  PWR_TRACK_TERMINATED is published for exactly one frame when a track is
+ *  retired, then its slot is released.  That single report is the end-of-track
+ *  notification: a consumer that keeps its own track file must delete on it
+ *  rather than infer death from a track number that stops appearing. */
 typedef enum PWR_TrackState
 {
     PWR_TRACK_FREE        = 0,
@@ -269,8 +274,13 @@ typedef struct PWR_RadarConfig
     int32_t  mti_mode;              /* PWR_MtiMode                             */
     int32_t  enable_pulse_compression;
     int32_t  enable_doppler_processing;
-    int32_t  enable_stc;            /* sensitivity time control (R^-4 taper)  */
-    double   stc_range_m;           /* STC effective span                      */
+    /* Sensitivity time control: an R^2 amplitude ramp (R^4 in power) that
+     * attenuates the near-in gates, modelled where a real STC attenuator sits
+     * - ahead of the receiver, so it acts on echo and clutter but not on
+     * thermal noise.  It therefore preserves signal-to-clutter ratio and
+     * charges the near-in signal-to-noise ratio. */
+    int32_t  enable_stc;
+    double   stc_range_m;           /* range at which the ramp reaches unity  */
 
     PWR_CfarConfig    cfar;
     PWR_ClusterConfig cluster;
@@ -346,7 +356,10 @@ typedef struct PWR_SimTarget
 typedef struct PWR_SimEnvironment
 {
     double   sea_state;             /* Douglas sea state 0..6                 */
-    double   land_clutter_rcs_dbsm; /* per-cell mean sigma0                   */
+    /* The distributed-clutter field is a function of range only: there is no
+     * land/sea partition, no coastline and no terrain masking, so no land
+     * clutter parameter is offered.  Surface clutter is described entirely by
+     * sea_state and clutter_to_noise_db below. */
     double   clutter_to_noise_db;   /* CNR at the first range gate            */
     double   clutter_spread_hz;     /* internal clutter motion spectral width */
     double   rain_rate_mmph;
@@ -455,11 +468,16 @@ typedef struct PWR_Stats
     uint64_t frames_published;
     uint64_t frames_dropped;
     uint32_t detections_current;
+    /* Plots lost at the PWR_MAX_DETECTIONS ceiling, cumulative.  Non-zero means
+     * the plot table saturated and the reported picture is incomplete - the
+     * detector kept the strongest plots and threw the rest away. */
+    uint32_t detections_dropped;
     uint32_t tracks_active;
     uint32_t tracks_confirmed;
     uint32_t tracks_created_total;
     uint32_t tracks_deleted_total;
     int32_t  run_state;                 /* PWR_RunState                        */
+    int32_t  _pad0;
 } PWR_Stats;
 
 /* ==========================================================================

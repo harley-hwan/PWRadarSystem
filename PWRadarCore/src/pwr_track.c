@@ -34,6 +34,28 @@
 #define PWR_ASSOC_REJECT   1.0e17
 #define PWR_TRAIL_PERIOD_S 0.25
 
+/* Retirement is a two-step affair: the rule that kills a track moves it to
+ * PWR_TRACK_TERMINATED, it is published once in that state so a consumer sees
+ * an explicit end-of-track rather than a report that merely stops arriving,
+ * and the slot is released at the top of the next update.  A terminated track
+ * is no longer live: it neither predicts, associates, books attempts nor
+ * inhibits initiation. */
+static int pwr_track_is_live(const PWR_TrackInternal* tk)
+{
+    return (tk->state != PWR_TRACK_FREE &&
+            tk->state != PWR_TRACK_TERMINATED) ? 1 : 0;
+}
+
+static void pwr_track_retire(PWR_Tracker* tr, PWR_TrackInternal* tk)
+{
+    if (tk->state == PWR_TRACK_FREE || tk->state == PWR_TRACK_TERMINATED)
+    {
+        return;
+    }
+    tk->state = PWR_TRACK_TERMINATED;
+    ++tr->deleted_total;
+}
+
 /* ==========================================================================
  *  Life cycle
  * ========================================================================== */
@@ -359,7 +381,6 @@ static void pwr_track_book_attempt(PWR_Tracker* tr, PWR_TrackInternal* tk,
         }
         ++tk->misses;
         ++tk->consecutive_misses;
-        tk->score -= 1.5;
     }
     {
         const uint32_t mask = (cfg->confirm_n >= 32)
@@ -376,8 +397,7 @@ static void pwr_track_book_attempt(PWR_Tracker* tr, PWR_TrackInternal* tk,
              tk->consecutive_misses >= (uint32_t)cfg->coast_misses &&
              tk->hits < 2u))
         {
-            tk->state = PWR_TRACK_FREE;
-            ++tr->deleted_total;
+            pwr_track_retire(tr, tk);
         }
         else if (tk->state == PWR_TRACK_CONFIRMED &&
                  tk->consecutive_misses >= (uint32_t)cfg->coast_misses)
@@ -457,7 +477,6 @@ static uint32_t pwr_track_init_from_detection(PWR_Tracker* tr,
     tk->last_update_time_s  = time_s;
     tk->last_predict_time_s = time_s;
     tk->radial_velocity_mps = det->radial_velocity_mps;
-    tk->score               = det->snr_db;
     tk->target_class        = PWR_CLASS_UNKNOWN;
     pwr_trail_push(tk, time_s);
     ++tr->created_total;
@@ -488,15 +507,22 @@ void pwr_tracker_update(struct PWR_Engine* e)
     uint32_t n_cand = 0u;
     uint32_t i, c;
 
+    /* ---- 0. release the slots of tracks retired on the previous update ---
+     *  They were held one extra publication so the consumer saw an explicit
+     *  PWR_TRACK_TERMINATED report; from here the slot is reusable. */
+    for (i = 0u; i < PWR_MAX_TRACKS; ++i)
+    {
+        if (tr->tracks[i].state == PWR_TRACK_TERMINATED)
+        {
+            tr->tracks[i].state = PWR_TRACK_FREE;
+        }
+    }
+
     if (cfg->enable == 0)
     {
         for (i = 0u; i < PWR_MAX_TRACKS; ++i)
         {
-            if (tr->tracks[i].state != PWR_TRACK_FREE)
-            {
-                tr->tracks[i].state = PWR_TRACK_FREE;
-                ++tr->deleted_total;
-            }
+            pwr_track_retire(tr, &tr->tracks[i]);
         }
         return;
     }
@@ -506,7 +532,7 @@ void pwr_tracker_update(struct PWR_Engine* e)
     {
         PWR_TrackInternal* tk = &tr->tracks[i];
         double dt;
-        if (tk->state == PWR_TRACK_FREE) { continue; }
+        if (pwr_track_is_live(tk) == 0) { continue; }
         tk->dwell_state = PWR_DWELL_IDLE;
         dt = now - tk->last_predict_time_s;
         if (dt > 0.0)
@@ -521,8 +547,7 @@ void pwr_tracker_update(struct PWR_Engine* e)
             if (!(sp <= cfg->max_speed_mps * 2.0) ||
                 !(tk->P[0] < 1.0e12) || !(tk->P[5] < 1.0e12))
             {
-                tk->state = PWR_TRACK_FREE;
-                ++tr->deleted_total;
+                pwr_track_retire(tr, tk);
                 continue;
             }
         }
@@ -542,14 +567,12 @@ void pwr_tracker_update(struct PWR_Engine* e)
                 pwr_maxd(2.0, (double)cfg->delete_misses + 2.0);
             if (tk->state == PWR_TRACK_TENTATIVE && missed > 1.5)
             {
-                tk->state = PWR_TRACK_FREE;
-                ++tr->deleted_total;
+                pwr_track_retire(tr, tk);
                 continue;
             }
             if (missed > kill_confirmed)
             {
-                tk->state = PWR_TRACK_FREE;
-                ++tr->deleted_total;
+                pwr_track_retire(tr, tk);
                 continue;
             }
             if (tk->state == PWR_TRACK_CONFIRMED && missed > 1.0)
@@ -757,7 +780,6 @@ void pwr_tracker_update(struct PWR_Engine* e)
                     tk->history_bits |= 1u;
                     if (tk->misses > 0u)             { --tk->misses; }
                     if (tk->consecutive_misses > 0u) { --tk->consecutive_misses; }
-                    tk->score += 1.5;
                     {
                         const uint32_t mask = (cfg->confirm_n >= 32)
                             ? 0xFFFFFFFFu
@@ -782,7 +804,6 @@ void pwr_tracker_update(struct PWR_Engine* e)
                 tk->last_meas_time_s   = now;
                 tk->last_update_time_s = now;
                 tk->radial_velocity_mps = det->radial_velocity_mps;
-                tk->score = pwr_ewma(tk->score, (double)det->snr_db, 0.3);
                 if (tk->state == PWR_TRACK_COASTING)
                 {
                     tk->state = PWR_TRACK_CONFIRMED;
@@ -797,7 +818,7 @@ void pwr_tracker_update(struct PWR_Engine* e)
                 tk->hit_this_scan = 0;
             }
 
-            if (tk->state != PWR_TRACK_FREE)
+            if (pwr_track_is_live(tk) != 0)
             {
                 const double sp = sqrt(tk->X[2] * tk->X[2] + tk->X[3] * tk->X[3]);
                 tk->target_class = pwr_classify(sp);
@@ -825,7 +846,7 @@ void pwr_tracker_update(struct PWR_Engine* e)
                 PWR_TrackInternal* tk = &tr->tracks[i];
                 double gate_az, d1;
                 int crossed, overdue;
-                if (tk->state == PWR_TRACK_FREE) { continue; }
+                if (pwr_track_is_live(tk) == 0) { continue; }
                 gate_az = pwr_wrap360(
                     pwr_rad_to_deg(atan2(tk->X[0], tk->X[1])) + lag);
                 d1 = pwr_wrap360(gate_az - prev);
@@ -886,7 +907,7 @@ void pwr_tracker_update(struct PWR_Engine* e)
                     {
                         const PWR_TrackInternal* tk = &tr->tracks[i];
                         double dx, dy;
-                        if (tk->state == PWR_TRACK_FREE) { continue; }
+                        if (pwr_track_is_live(tk) == 0) { continue; }
                         dx = zx - tk->X[0];
                         dy = zy - tk->X[1];
                         if (dx * dx + dy * dy < inhibit2) { blocked = 1; break; }

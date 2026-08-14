@@ -29,11 +29,7 @@ void pwr_chain_pulse_compress(struct PWR_Engine* e)
     const uint32_t n_fft     = e->n_fast_fft;
     const uint32_t decim     = e->range_decim;
     const uint32_t offset    = e->range_offset;
-    const double   inv_np    = 1.0 / (double)n_pulses;
-    const double   inv_var   = 1.0 / (e->sigma_pc * e->sigma_pc);
     uint32_t p, i;
-
-    memset(e->profile_raw, 0, (size_t)n_range * sizeof(pwr_real));
 
     for (p = 0u; p < n_pulses; ++p)
     {
@@ -73,20 +69,45 @@ void pwr_chain_pulse_compress(struct PWR_Engine* e)
             }
         }
 
-        /* Sensitivity time control: an R^-4 compensating taper applied to the
-         * near-in gates, exactly as an analogue STC ramp would. */
-        if (e->cfg.enable_stc != 0 && e->stc_gain != NULL)
-        {
-            for (i = 0u; i < n_range; ++i)
-            {
-                dst[i] = pwr_cscale(dst[i], e->stc_gain[i]);
-            }
-        }
+        /* Sensitivity time control is deliberately NOT applied here.  An
+         * analogue STC ramp sits ahead of the receiver, so it attenuates the
+         * echo and the surface clutter arriving from a gate but never the
+         * receiver's own thermal noise.  Applying it to the compressed cube
+         * would hit the noise as well - and, because distributed clutter is
+         * injected after this stage, would miss the clutter entirely, which
+         * is the one signal the control exists to suppress.  The ramp is
+         * charged at the two places the arriving energy is synthesised:
+         * pwr_sim_generate_cpi() for echoes and pwr_sim_add_clutter() for the
+         * distributed field. */
+    }
+}
 
-        /* Pre-MTI incoherent average, used for the "raw video" A-scope trace. */
+/* ==========================================================================
+ *  1b.  Raw-video trace
+ * ==========================================================================
+ *  Incoherent average across the pulse dimension - the pre-MTI "raw video"
+ *  A-scope trace.  It is a separate pass rather than a few lines inside the
+ *  compression loop because it has to run *after* pwr_sim_add_clutter(): the
+ *  distributed clutter field is injected into the compressed cube, so a trace
+ *  accumulated during compression would show none of the clutter, which is the
+ *  one thing that trace is read for - it is what the MTI comparison on the
+ *  A-scope is against.
+ * ------------------------------------------------------------------------ */
+void pwr_chain_raw_profile(struct PWR_Engine* e)
+{
+    const uint32_t n_pulses = e->n_pulses;
+    const uint32_t n_range  = e->n_range;
+    const double   inv_np   = 1.0 / (double)n_pulses;
+    const double   inv_var  = 1.0 / (e->sigma_pc * e->sigma_pc);
+    uint32_t p, i;
+
+    memset(e->profile_raw, 0, (size_t)n_range * sizeof(pwr_real));
+    for (p = 0u; p < n_pulses; ++p)
+    {
+        const PWR_Complex* PWR_RESTRICT src = &e->pc[(size_t)p * n_range];
         for (i = 0u; i < n_range; ++i)
         {
-            e->profile_raw[i] += (pwr_real)(pwr_cabs2(dst[i]) * inv_np * inv_var);
+            e->profile_raw[i] += (pwr_real)(pwr_cabs2(src[i]) * inv_np * inv_var);
         }
     }
 }

@@ -11,6 +11,7 @@
  *   T7  a target's measured range rate matches its true range rate
  *   T8  the noise-only false-alarm rate tracks the design Pfa
  *   T9  a straight-line target is tracked to within a few tens of metres
+ *   T10 every CFAR family achieves its design Pfa, not just cell averaging
  */
 #include "pwr_core.h"
 
@@ -517,6 +518,105 @@ static void pwr_test_tracking(PWR_TestCtx* c)
 }
 
 /* ==========================================================================
+ *  T10 - threshold multipliers of every CFAR family
+ * ==========================================================================
+ *  Each family thresholds a different statistic and therefore needs its own
+ *  multiplier.  Borrowing the cell-averaging one - which is what this used to
+ *  do for the trimmed mean, and at half window for greatest-of and
+ *  smallest-of - puts the achieved false-alarm rate out by more than an order
+ *  of magnitude, silently, on a knob the operator is invited to turn.
+ *
+ *  The geometry here is deliberately critically sampled: rectangular tapers,
+ *  no Doppler oversampling, sample rate equal to the bandwidth.  Neighbouring
+ *  cells are then close to independent, which is what every multiplier
+ *  assumes, so the achieved rate can be held to the design value instead of to
+ *  a decade of it as in T8.  Peak selection and clustering are off, so what is
+ *  counted is raw threshold crossings.
+ * ------------------------------------------------------------------------ */
+static void pwr_test_cfar_families(PWR_TestCtx* c)
+{
+    static const int32_t types[PWR_CFAR_COUNT] = {
+        PWR_CFAR_CA, PWR_CFAR_GOCA, PWR_CFAR_SOCA, PWR_CFAR_OS, PWR_CFAR_TM
+    };
+    const double design = 1.0e-3;
+    char detail[224];
+    size_t len = 0u;
+    int ok = 1;
+    int t;
+
+    for (t = 0; t < PWR_CFAR_COUNT; ++t)
+    {
+        PWR_RadarConfig cfg;
+        PWR_SimEnvironment env;
+        PWR_Engine* e = NULL;
+        double ratio = 0.0;
+        int n;
+
+        (void)pwr_config_default(&cfg);
+        cfg.worker_thread     = 0;
+        cfg.deterministic     = 1;
+        cfg.scan_rate_rpm     = 0.0;
+        cfg.range_span_m      = 12000.0;
+        cfg.range_bins        = 400u;
+        cfg.ppi_azimuth_cells = 128u;
+        cfg.rti_rows          = 16u;
+        cfg.sample_rate_hz    = cfg.bandwidth_hz;   /* critically sampled     */
+        cfg.doppler_bins      = cfg.pulses_per_cpi; /* no Doppler oversample  */
+        cfg.range_window      = PWR_WIN_RECTANGULAR;
+        cfg.doppler_window    = PWR_WIN_RECTANGULAR;
+        cfg.mti_mode          = PWR_MTI_OFF;
+        cfg.cfar.type                = types[t];
+        cfg.cfar.pfa                 = design;
+        cfg.cfar.censor_zero_doppler = 0;
+        cfg.cfar.peak_selection      = 0;
+        /* A range-only reference window, which is what OS and TM use anyway,
+         * so all five families are compared over the same 24 cells.  It also
+         * leaves the two halves exactly equal at 12 cells each - the condition
+         * the greatest-of / smallest-of expressions are derived under - and
+         * keeps the window small enough that a borrowed multiplier shows up as
+         * a factor of several rather than a few per cent. */
+        cfg.cfar.guard_doppler       = 0;
+        cfg.cfar.train_doppler       = 0;
+        cfg.cluster.enable     = 0;
+        cfg.cluster.min_cells  = 1;
+        cfg.cluster.min_snr_db = -100.0;
+        cfg.tracker.enable     = 0;
+        if (pwr_engine_create(&cfg, &e) != PWR_STATUS_OK) { ok = 0; break; }
+
+        (void)pwr_engine_get_environment(e, &env);
+        env.enable_thermal_noise = 1;
+        env.enable_sea_clutter   = 0;
+        env.enable_eclipsing     = 0;
+        (void)pwr_engine_set_environment(e, &env);
+
+        (void)pwr_engine_step(e, 40u);
+        {
+            PWR_Stats st;
+            (void)pwr_engine_get_stats(e, &st);
+            if (st.cells_tested_total > 0u)
+            {
+                ratio = ((double)st.detection_total /
+                         (double)st.cells_tested_total) / design;
+            }
+            /* A saturated plot table would make the count a floor, not a rate. */
+            if (st.detections_dropped != 0u) { ok = 0; }
+        }
+        pwr_engine_destroy(e);
+
+        if (!(ratio > 0.5 && ratio < 2.0)) { ok = 0; }
+        if (len < sizeof(detail))
+        {
+            n = snprintf(detail + len, sizeof(detail) - len, "%s%s %.2f",
+                         (t > 0) ? ", " : "",
+                         pwr_cfar_name((PWR_CfarType)types[t]), ratio);
+            if (n > 0) { len += (size_t)n; }
+            if (len > sizeof(detail)) { len = sizeof(detail); }
+        }
+    }
+    pwr_check(c, "T10 CFAR family multipliers", ok, detail);
+}
+
+/* ==========================================================================
  *  Entry point
  * ========================================================================== */
 PWR_EXPORT(PWR_Status) pwr_self_test(char* report, size_t report_cap)
@@ -538,6 +638,7 @@ PWR_EXPORT(PWR_Status) pwr_self_test(char* report, size_t report_cap)
     pwr_test_doppler_accuracy(&ctx);
     pwr_test_pfa(&ctx);
     pwr_test_tracking(&ctx);
+    pwr_test_cfar_families(&ctx);
 
     pwr_tprintf(&ctx, "  %d/%d cases passed\n",
                 ctx.cases - ctx.failures, ctx.cases);

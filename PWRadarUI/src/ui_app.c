@@ -665,6 +665,25 @@ static void app_panel_waveform(App* a, UI_Rect r)
     (void)snprintf(buf, sizeof(buf), "%.2f km", a->dm.blind_range_m * 1e-3);
     ui_readout(c, row, "blind range", buf, UI_C_TEXT);
 
+    /* Pulses the antenna puts on a target while the mainlobe crosses it.  A CPI
+     * longer than this spreads one coherent batch over more than a beamwidth,
+     * so the advertised integration gain is not achieved and the azimuth
+     * centroid has no beam-shape modulation left to split - the amber is the
+     * only warning the operator gets that the geometry has left its envelope. */
+    row = ui_stack_row(&s, 17);
+    if (a->dm.scan_period_s > 0.0)
+    {
+        (void)snprintf(buf, sizeof(buf), "%.1f (CPI %u)",
+                       a->dm.pulses_per_beamwidth, a->cfg.pulses_per_cpi);
+        ui_readout(c, row, "pulses/beam", buf,
+                   ((double)a->cfg.pulses_per_cpi > a->dm.pulses_per_beamwidth)
+                       ? UI_C_WARN : UI_C_TEXT);
+    }
+    else
+    {
+        ui_readout(c, row, "pulses/beam", "staring", UI_C_TEXT);
+    }
+
     row = ui_stack_row(&s, 17);
     (void)snprintf(buf, sizeof(buf), "%.2f %%", a->dm.duty_cycle * 100.0);
     ui_readout(c, row, "duty cycle", buf,

@@ -12,13 +12,25 @@
  * processor does, and range is where OS earns its keep anyway (closely spaced
  * targets).
  *
- * Threshold multipliers, square-law detector, exponential clutter+noise power:
- *   CA   alpha = N * (Pfa^(-1/N) - 1)
- *   OS   Pfa = prod_{i<k} (N-i)/(N-i+alpha), solved by bisection - exact for
- *        the k-th ranked cell
- *   TM   CA form on the count left after trimming
- *   GO   CA form on the half window at Pfa/2 (standard approximation)
- *   SO   CA form on the half window at Pfa (optimistic)
+ * Every family thresholds a cell at T = alpha * Z, where Z is that family's
+ * estimator of the local interference level built from N reference cells whose
+ * power is exponentially distributed. alpha is solved from the *exact*
+ * false-alarm expression of each family rather than borrowed from CA, because
+ * the borrowed multipliers are wrong by more than the operator's threshold
+ * bias knob: on the default window the CA multiplier applied to a trimmed mean
+ * delivers about nineteen times the design Pfa.
+ *
+ *   CA   Pfa = (1 + alpha/N)^-N                            closed form
+ *   OS   Pfa = prod_{i<k} (N-i)/(N-i+alpha)                exact, k-th ranked
+ *   TM   Pfa = prod_j 1/(1 + (alpha/k) c_j)                exact, see below
+ *   SO   Pfa = 1 - (t/(t+2)) sum_n u_n r^n                 exact, see below
+ *   GO   Pfa = 2 (1+t)^-M - Pfa_SO(alpha, M)               exact, see below
+ *
+ * Each family also carries a mean-unbiasing divisor so that the level reported
+ * on a plot is an estimate of the interference *mean* whatever the family: the
+ * k-th ranked cell sits above the mean and a trimmed mean below it, and
+ * without the correction the same target reads a different SNR under OS than
+ * under CA.  The divisor never touches the threshold, only the report.
  */
 #include "pwr_core.h"
 
@@ -46,18 +58,178 @@ static double pwr_os_pfa(double alpha, uint32_t n, uint32_t k)
     return p;
 }
 
-static double pwr_alpha_os(uint32_t n, uint32_t k, double pfa)
+/* Expected value of the k-th smallest of n unit-mean exponentials. */
+static double pwr_os_bias(uint32_t n, uint32_t k)
 {
-    double lo = 0.0, hi = 1.0e6;
+    double s = 0.0;
+    uint32_t j;
+    for (j = 1u; j <= k; ++j) { s += 1.0 / (double)(n - j + 1u); }
+    return (s > 0.0) ? s : 1.0;
+}
+
+/* --------------------------------------------------------------------------
+ *  Trimmed mean
+ *  ------------
+ *  With x_(i) the ordered reference powers and Z = (1/k) sum_{i=t1+1}^{n-t2}
+ *  x_(i), k = n - t1 - t2, the Renyi representation
+ *
+ *      x_(i) = mu * sum_{j<=i} e_j / (n-j+1),      e_j iid Exp(1)
+ *
+ *  collects each e_j with multiplicity min(k, n-t2-j+1), so
+ *
+ *      Z = (mu/k) sum_{j=1}^{n-t2} c_j e_j,   c_j = min(k, n-t2-j+1)/(n-j+1)
+ *
+ *  and, the cell under test being an independent Exp(mu),
+ *
+ *      Pfa = E[exp(-alpha Z/mu)] = prod_j 1 / (1 + (alpha/k) c_j).
+ *
+ *  Setting t1 = t2 = 0 gives c_j == 1 and recovers the CA closed form exactly,
+ *  which is the check that the derivation is right.  E[Z]/mu = (sum_j c_j)/k
+ *  is the unbiasing divisor.
+ * ------------------------------------------------------------------------ */
+static void pwr_tm_trim(const PWR_CfarConfig* cf, uint32_t cnt,
+                        uint32_t* out_lo, uint32_t* out_hi)
+{
+    uint32_t lo = (uint32_t)pwr_maxi(0, cf->trim_low);
+    uint32_t hi = (uint32_t)pwr_maxi(0, cf->trim_high);
+    if (lo + hi >= cnt) { lo = 0u; hi = 0u; }
+    *out_lo = lo;
+    *out_hi = hi;
+}
+
+static double pwr_tm_pfa(double alpha, uint32_t n, uint32_t t1, uint32_t t2)
+{
+    const uint32_t k = n - t1 - t2;
+    const double   a = alpha / (double)k;
+    double p = 1.0;
+    uint32_t j;
+    for (j = 1u; j <= n - t2; ++j)
+    {
+        const double c = (double)pwr_minu(k, n - t2 - j + 1u) /
+                         (double)(n - j + 1u);
+        p *= 1.0 / (1.0 + a * c);
+    }
+    return p;
+}
+
+static double pwr_tm_bias(uint32_t n, uint32_t t1, uint32_t t2)
+{
+    const uint32_t k = n - t1 - t2;
+    double s = 0.0;
+    uint32_t j;
+    for (j = 1u; j <= n - t2; ++j)
+    {
+        s += (double)pwr_minu(k, n - t2 - j + 1u) / (double)(n - j + 1u);
+    }
+    return (s > 0.0) ? (s / (double)k) : 1.0;
+}
+
+/* --------------------------------------------------------------------------
+ *  Smallest-of and greatest-of
+ *  ---------------------------
+ *  With S1, S2 iid Gamma(M, mu) the two half-window sums and Z = min or max of
+ *  S1/M, S2/M, write Q(w) = P(Gamma(M) > w) = e^-w sum_{j<M} w^j/j!.  Then
+ *
+ *      Pfa_SO = 1 - t Int e^-tw Q(w)^2 dw,        t = alpha/M
+ *
+ *  and expanding Q^2 = e^-2w sum_n c_n w^n / n!, with c_n the count of the
+ *  (j,l) pairs summing to n, each term integrates to c_n/(t+2)^(n+1).  Scaling
+ *  by 2^n turns c_n into a two-sided binomial probability that never leaves
+ *  [0,1], so the series is numerically tame:
+ *
+ *      Pfa_SO = 1 - (t/(t+2)) sum_{n=0}^{2M-2} u_n r^n,   r = 2/(t+2)
+ *      u_n = P(max(0,n-M+1) <= X <= min(n,M-1)),  X ~ Binomial(n, 1/2)
+ *
+ *  u_n is 1 below n = M and needs no alpha, so it is built once per M.  The
+ *  greatest-of case then follows from Int e^-tw Q dw = [1 - (1+t)^-M]/t:
+ *
+ *      Pfa_GO = 2 (1+t)^-M - Pfa_SO
+ *
+ *  Both reduce to the CA form as M grows, which is what the old code assumed
+ *  outright; at practical window sizes SO ran optimistic and GO conservative.
+ * ------------------------------------------------------------------------ */
+static void pwr_so_weights(uint32_t m, double* w)
+{
+    const uint32_t last = 2u * m - 2u;
+    uint32_t n;
+    double p, q;
+
+    for (n = 0u; n < m; ++n) { w[n] = 1.0; }
+    if (m < 2u) { return; }
+
+    /* q = P(X_n >= M), p = P(X_n = M-1), advanced together from n = M-1.
+     * p starts at 2^-(M-1), which underflows for a very wide window; the
+     * series then degenerates gracefully to u_n == 1, i.e. to the CA limit,
+     * which is exactly where SO and GO converge at large M anyway. */
+    q = 0.0;
+    p = ldexp(1.0, -(int)(m - 1u));
+    for (n = m - 1u; n < last; ++n)
+    {
+        q += 0.5 * p;
+        p  = p * (double)(n + 1u) / (2.0 * (double)(n + 2u - m));
+        w[n + 1u] = pwr_clampd(1.0 - 2.0 * q, 0.0, 1.0);
+    }
+}
+
+static double pwr_so_pfa(double alpha, uint32_t m, const double* w)
+{
+    const double   t    = alpha / (double)m;
+    const double   r    = 2.0 / (t + 2.0);
+    const uint32_t last = 2u * m - 2u;
+    double s = 0.0, rn = 1.0;
+    uint32_t n;
+    for (n = 0u; n <= last; ++n)
+    {
+        s += w[n] * rn;
+        rn *= r;
+    }
+    return pwr_clampd(1.0 - (t / (t + 2.0)) * s, 0.0, 1.0);
+}
+
+static double pwr_go_pfa(double alpha, uint32_t m, const double* w)
+{
+    const double t = alpha / (double)m;
+    return pwr_clampd(2.0 * pow(1.0 + t, -(double)m) - pwr_so_pfa(alpha, m, w),
+                      0.0, 1.0);
+}
+
+/* --------------------------------------------------------------------------
+ *  Generic solve.  Every Pfa expression above is strictly decreasing in alpha,
+ *  so a bracket-and-bisect is both safe and, at these sizes, cheap - and it is
+ *  paid once per distinct reference count for the life of the engine, not once
+ *  per cell.
+ * ------------------------------------------------------------------------ */
+typedef struct PWR_CfarLaw
+{
+    int32_t  type;
+    uint32_t n;         /* reference count; half-window count for GO / SO    */
+    uint32_t k;         /* OS rank                                           */
+    uint32_t t1, t2;    /* TM trim counts                                    */
+    const double* w;    /* SO / GO weight series, [2n-1]                     */
+} PWR_CfarLaw;
+
+static double pwr_cfar_pfa_of(const PWR_CfarLaw* L, double alpha)
+{
+    switch (L->type)
+    {
+    case PWR_CFAR_OS:   return pwr_os_pfa(alpha, L->n, L->k);
+    case PWR_CFAR_TM:   return pwr_tm_pfa(alpha, L->n, L->t1, L->t2);
+    case PWR_CFAR_SOCA: return pwr_so_pfa(alpha, L->n, L->w);
+    case PWR_CFAR_GOCA: return pwr_go_pfa(alpha, L->n, L->w);
+    default:            return pow(1.0 + alpha / (double)L->n, -(double)L->n);
+    }
+}
+
+static double pwr_cfar_solve_alpha(const PWR_CfarLaw* L, double pfa)
+{
+    double lo = 0.0, hi = 1.0;
     int it;
-    if (n == 0u || k == 0u || k > n) { return 1.0e12; }
-    /* pwr_os_pfa is strictly decreasing in alpha, so plain bisection is both
-     * safe and fast enough (40 iterations => 1e-6 relative). */
-    while (pwr_os_pfa(hi, n, k) > pfa && hi < 1.0e12) { hi *= 4.0; }
-    for (it = 0; it < 60; ++it)
+    if (L->n == 0u) { return 1.0e12; }
+    while (pwr_cfar_pfa_of(L, hi) > pfa && hi < 1.0e12) { hi *= 4.0; }
+    for (it = 0; it < 80; ++it)
     {
         const double mid = 0.5 * (lo + hi);
-        if (pwr_os_pfa(mid, n, k) > pfa) { lo = mid; } else { hi = mid; }
+        if (pwr_cfar_pfa_of(L, mid) > pfa) { lo = mid; } else { hi = mid; }
     }
     return 0.5 * (lo + hi);
 }
@@ -77,20 +249,39 @@ PWR_Status pwr_cfar_alloc(PWR_CfarWork* w, uint32_t n_doppler, uint32_t n_range,
     train_cap = (uint32_t)(2 * (cfg->train_range + cfg->guard_range) + 4);
     train_cap = pwr_maxu(train_cap, 4096u);
 
+    /* Reference-count ceiling for the multiplier cache: every row of the
+     * Doppler window times the full range extent bounds any count the detector
+     * can present, for every family. */
+    {
+        const uint32_t rows = (uint32_t)(2 * (cfg->guard_doppler +
+                                              cfg->train_doppler) + 1);
+        const uint32_t cols = (uint32_t)(2 * (cfg->guard_range +
+                                              cfg->train_range) + 1);
+        w->alpha_cap = rows * cols + 4u;
+    }
+
     w->hit           = PWR_ALLOC_ARRAY(uint8_t,  (size_t)n_doppler * n_range);
     w->threshold     = PWR_ALLOC_ARRAY(pwr_real, (size_t)n_doppler * n_range);
+    w->noise_est     = PWR_ALLOC_ARRAY(pwr_real, (size_t)n_doppler * n_range);
     w->integral      = PWR_ALLOC_ARRAY(double,   (size_t)n_doppler * (n_range + 1u));
     w->win_psum      = PWR_ALLOC_ARRAY(double,   (size_t)n_range + 1u);
     w->gband_psum    = PWR_ALLOC_ARRAY(double,   (size_t)n_range + 1u);
     w->train_scratch = PWR_ALLOC_ARRAY(pwr_real, train_cap);
-    if (w->hit == NULL || w->threshold == NULL || w->integral == NULL ||
+    w->alpha_tab     = PWR_ALLOC_ARRAY(double,   w->alpha_cap);
+    w->bias_tab      = PWR_ALLOC_ARRAY(double,   w->alpha_cap);
+    w->alpha_set     = PWR_ALLOC_ARRAY(uint8_t,  w->alpha_cap);
+    w->so_scratch    = PWR_ALLOC_ARRAY(double,   (size_t)2u * w->alpha_cap);
+    if (w->hit == NULL || w->threshold == NULL || w->noise_est == NULL ||
+        w->integral == NULL ||
         w->win_psum == NULL || w->gband_psum == NULL ||
-        w->train_scratch == NULL)
+        w->train_scratch == NULL || w->alpha_tab == NULL ||
+        w->bias_tab == NULL || w->alpha_set == NULL || w->so_scratch == NULL)
     {
         pwr_cfar_release(w);
         return PWR_ERR_OUT_OF_MEMORY;
     }
     w->train_capacity = train_cap;
+    w->tuned_valid    = 0;
     return PWR_STATUS_OK;
 }
 
@@ -99,11 +290,18 @@ void pwr_cfar_release(PWR_CfarWork* w)
     if (w == NULL) { return; }
     PWR_FREE(w->hit);
     PWR_FREE(w->threshold);
+    PWR_FREE(w->noise_est);
     PWR_FREE(w->integral);
     PWR_FREE(w->win_psum);
     PWR_FREE(w->gband_psum);
     PWR_FREE(w->train_scratch);
+    PWR_FREE(w->alpha_tab);
+    PWR_FREE(w->bias_tab);
+    PWR_FREE(w->alpha_set);
+    PWR_FREE(w->so_scratch);
     w->train_capacity = 0u;
+    w->alpha_cap      = 0u;
+    w->tuned_valid    = 0;
     w->cells_tested   = 0u;
     w->cells_hit      = 0u;
 }
@@ -116,28 +314,105 @@ void pwr_cfar_release(PWR_CfarWork* w)
  *   * The estimator family is dispatched once per Doppler row, not once per
  *     cell, and the wrapped Doppler row indices are computed once per row.
  *   * alpha depends only on the reference count, which takes only a handful of
- *     distinct values (it varies solely at the range edges), so it is memoised
- *     instead of calling pow() 64k times per CPI.
+ *     distinct values (it varies solely at the range edges), so it is memoised.
+ *     The table lives in the workspace rather than on the stack, so an exact
+ *     multiplier is solved once for the life of the engine instead of once per
+ *     CPI - which is what makes the bisection families affordable at all.
  * ------------------------------------------------------------------------ */
-#define PWR_ALPHA_TAB_MAX 1024u
 #define PWR_CFAR_MAX_HD   32
 
-typedef struct PWR_AlphaCache
+static uint32_t pwr_os_rank(const PWR_CfarConfig* cf, uint32_t cnt)
 {
-    double   pfa;
-    double   val[PWR_ALPHA_TAB_MAX];
-    uint8_t  set[PWR_ALPHA_TAB_MAX];
-} PWR_AlphaCache;
+    uint32_t k = (cf->os_rank > 0) ? (uint32_t)cf->os_rank
+                                   : (uint32_t)((double)cnt * 0.75 + 0.5);
+    if (k == 0u)   { k = 1u; }
+    if (k > cnt)   { k = cnt; }
+    return k;
+}
 
-static double pwr_alpha_cached(PWR_AlphaCache* ac, uint32_t n)
+/* Drops the memoised multipliers whenever anything they were solved for has
+ * moved.  Called once per CPI; a hit costs one comparison chain. */
+static void pwr_cfar_tuning_sync(PWR_CfarWork* w, const PWR_CfarConfig* cf)
 {
-    if (n >= PWR_ALPHA_TAB_MAX) { return pwr_alpha_ca(n, ac->pfa); }
-    if (ac->set[n] == 0u)
+    if (w->tuned_valid != 0 &&
+        w->tuned_pfa       == cf->pfa &&
+        w->tuned_type      == cf->type &&
+        w->tuned_os_rank   == cf->os_rank &&
+        w->tuned_trim_low  == cf->trim_low &&
+        w->tuned_trim_high == cf->trim_high)
     {
-        ac->val[n] = pwr_alpha_ca(n, ac->pfa);
-        ac->set[n] = 1u;
+        return;
     }
-    return ac->val[n];
+    memset(w->alpha_set, 0, (size_t)w->alpha_cap * sizeof(uint8_t));
+    w->tuned_pfa       = cf->pfa;
+    w->tuned_type      = cf->type;
+    w->tuned_os_rank   = cf->os_rank;
+    w->tuned_trim_low  = cf->trim_low;
+    w->tuned_trim_high = cf->trim_high;
+    w->tuned_valid     = 1;
+}
+
+/* Threshold multiplier and mean-unbiasing divisor for a reference count.
+ * For GO / SO, @p n is the per-half count. */
+static void pwr_cfar_tuning(PWR_CfarWork* w, const PWR_CfarConfig* cf,
+                            uint32_t n, double* out_alpha, double* out_bias)
+{
+    PWR_CfarLaw law;
+    double alpha, bias = 1.0;
+
+    if (n == 0u) { *out_alpha = 1.0e12; *out_bias = 1.0; return; }
+    if (n < w->alpha_cap && w->alpha_set[n] != 0u)
+    {
+        *out_alpha = w->alpha_tab[n];
+        *out_bias  = w->bias_tab[n];
+        return;
+    }
+
+    memset(&law, 0, sizeof(law));
+    law.type = cf->type;
+    law.n    = n;
+
+    switch (cf->type)
+    {
+    case PWR_CFAR_OS:
+        law.k = pwr_os_rank(cf, n);
+        alpha = pwr_cfar_solve_alpha(&law, cf->pfa);
+        bias  = pwr_os_bias(n, law.k);
+        break;
+
+    case PWR_CFAR_TM:
+        pwr_tm_trim(cf, n, &law.t1, &law.t2);
+        alpha = pwr_cfar_solve_alpha(&law, cf->pfa);
+        bias  = pwr_tm_bias(n, law.t1, law.t2);
+        break;
+
+    case PWR_CFAR_SOCA:
+    case PWR_CFAR_GOCA:
+        /* The exact expressions want the alpha-independent weight series for
+         * this half-window size; 2n-1 entries, and so_scratch is sized for the
+         * widest window the configuration allows. */
+        pwr_so_weights(n, w->so_scratch);
+        law.w = w->so_scratch;
+        alpha = pwr_cfar_solve_alpha(&law, cf->pfa);
+        /* Residual: the greatest-of / smallest-of statistic sits about
+         * 1/sqrt(pi*n) either side of the mean, i.e. under 0.2 dB at any
+         * practical window size, so no unbiasing divisor is carried. */
+        break;
+
+    case PWR_CFAR_CA:
+    default:
+        alpha = pwr_alpha_ca(n, cf->pfa);
+        break;
+    }
+
+    if (n < w->alpha_cap)
+    {
+        w->alpha_tab[n] = alpha;
+        w->bias_tab[n]  = bias;
+        w->alpha_set[n] = 1u;
+    }
+    *out_alpha = alpha;
+    *out_bias  = bias;
 }
 
 /* Local-maximum test inside the guard region.  Operates on the untouched power
@@ -200,15 +475,13 @@ void pwr_cfar_run(struct PWR_Engine* e)
     const int      ca_family = (cf->type == PWR_CFAR_CA ||
                                 cf->type == PWR_CFAR_GOCA ||
                                 cf->type == PWR_CFAR_SOCA) ? 1 : 0;
-    PWR_AlphaCache ac;
     uint32_t j, r;
 
     e->cfar.cells_tested = 0u;
     e->cfar.cells_hit    = 0u;
     memset(e->cfar.hit, 0, (size_t)nd * nr * sizeof(uint8_t));
 
-    ac.pfa = cf->pfa;
-    memset(ac.set, 0, sizeof(ac.set));
+    pwr_cfar_tuning_sync(&e->cfar, cf);
 
     /* ---- per-row prefix sums along range ------------------------------- */
     for (j = 0u; j < nd; ++j)
@@ -230,6 +503,10 @@ void pwr_cfar_run(struct PWR_Engine* e)
         const pwr_real* PWR_RESTRICT row = &e->rd_pow[(size_t)j * nr];
         uint8_t*  PWR_RESTRICT hit = &e->cfar.hit[(size_t)j * nr];
         pwr_real* PWR_RESTRICT thr = &e->cfar.threshold[(size_t)j * nr];
+        /* Local interference-mean estimate, published so a plot's SNR is
+         * measured against the level the detector actually competed with in
+         * that cell rather than against a global median of the whole map. */
+        pwr_real* PWR_RESTRICT nse = &e->cfar.noise_est[(size_t)j * nr];
         const int32_t censor = (cf->censor_zero_doppler != 0 &&
                                 labs((long)((int32_t)j - zero_row)) <=
                                     (long)cf->zero_doppler_guard) ? 1 : 0;
@@ -299,7 +576,7 @@ void pwr_cfar_run(struct PWR_Engine* e)
                 const int32_t g_hi = pwr_mini((int32_t)nr - 1, (int32_t)r + Gr);
                 double sum_lead = 0.0, sum_lag = 0.0;
                 uint32_t n_lead = 0u, n_lag = 0u, n_ref;
-                double noise_est, alpha, threshold;
+                double noise_est, alpha, threshold, unbias = 1.0;
 
                 /* Same arithmetic as the old per-row walk, regrouped through
                  * the combined window rows: the lead/lag spans are identical
@@ -331,30 +608,44 @@ void pwr_cfar_run(struct PWR_Engine* e)
                 if (cf->type == PWR_CFAR_CA)
                 {
                     n_ref = n_lead + n_lag;
-                    if (n_ref == 0u) { thr[r] = (pwr_real)1.0e30; continue; }
+                    if (n_ref == 0u)
+                    {
+                        thr[r] = (pwr_real)1.0e30;
+                        nse[r] = (pwr_real)1.0e30;
+                        continue;
+                    }
                     noise_est = (sum_lead + sum_lag) / (double)n_ref;
-                    alpha     = pwr_alpha_cached(&ac, n_ref);
+                    pwr_cfar_tuning(&e->cfar, cf, n_ref, &alpha, &unbias);
                 }
                 else
                 {
                     const double m_lead = (n_lead > 0u) ? sum_lead / (double)n_lead : 0.0;
                     const double m_lag  = (n_lag  > 0u) ? sum_lag  / (double)n_lag  : 0.0;
-                    n_ref = pwr_maxu(pwr_maxu(n_lead, n_lag), 1u);
-                    if (cf->type == PWR_CFAR_GOCA)
+                    if (n_lead == 0u || n_lag == 0u)
                     {
+                        /* One half fell off the map edge, so the greatest-of /
+                         * smallest-of test degenerates to plain cell averaging
+                         * over whichever half survived. */
+                        n_ref     = pwr_maxu(pwr_maxu(n_lead, n_lag), 1u);
                         noise_est = pwr_maxd(m_lead, m_lag);
-                        alpha     = pwr_alpha_ca(n_ref, cf->pfa * 0.5);
+                        alpha     = pwr_alpha_ca(n_ref, cf->pfa);
                     }
                     else
                     {
-                        noise_est = (n_lead > 0u && n_lag > 0u)
-                            ? pwr_mind(m_lead, m_lag) : pwr_maxd(m_lead, m_lag);
-                        alpha     = pwr_alpha_cached(&ac, n_ref);
+                        /* The exact GO / SO expressions assume equal halves.
+                         * The two counts here differ only by the guard-band
+                         * split, so taking the smaller is both well defined
+                         * and conservative whichever way the split fell. */
+                        n_ref     = pwr_minu(n_lead, n_lag);
+                        noise_est = (cf->type == PWR_CFAR_GOCA)
+                            ? pwr_maxd(m_lead, m_lag) : pwr_mind(m_lead, m_lag);
+                        pwr_cfar_tuning(&e->cfar, cf, n_ref, &alpha, &unbias);
                     }
                 }
 
                 threshold = noise_est * alpha * bias;
                 thr[r]    = (pwr_real)threshold;
+                nse[r]    = (pwr_real)(noise_est / unbias);
                 /* A censored cell receives no detection test, so it must not
                  * enter the measured-Pfa denominator either - counting it
                  * would bias stats.measured_pfa low by the censored fraction. */
@@ -377,7 +668,7 @@ void pwr_cfar_run(struct PWR_Engine* e)
             {
                 pwr_real* buf = e->cfar.train_scratch;
                 uint32_t cnt = 0u, k;
-                double noise_est, alpha, threshold;
+                double noise_est, alpha, threshold, unbias = 1.0;
                 int32_t dr;
 
                 for (dr = -Hr; dr <= Hr; ++dr)
@@ -387,16 +678,19 @@ void pwr_cfar_run(struct PWR_Engine* e)
                     if (rr < 0 || rr >= (int32_t)nr) { continue; }
                     if (cnt < e->cfar.train_capacity) { buf[cnt++] = row[rr]; }
                 }
-                if (cnt == 0u) { thr[r] = (pwr_real)1.0e30; continue; }
+                if (cnt == 0u)
+                {
+                    thr[r] = (pwr_real)1.0e30;
+                    nse[r] = (pwr_real)1.0e30;
+                    continue;
+                }
 
-                k = (cf->os_rank > 0) ? (uint32_t)cf->os_rank
-                                      : (uint32_t)((double)cnt * 0.75 + 0.5);
-                if (k == 0u) { k = 1u; }
-                if (k > cnt) { k = cnt; }
+                k         = pwr_os_rank(cf, cnt);
                 noise_est = (double)pwr_select_kth_f32(buf, cnt, k - 1u);
-                alpha     = pwr_alpha_os(cnt, k, cf->pfa);
+                pwr_cfar_tuning(&e->cfar, cf, cnt, &alpha, &unbias);
                 threshold = noise_est * alpha * bias;
                 thr[r]    = (pwr_real)threshold;
+                nse[r]    = (pwr_real)(noise_est / unbias);
                 if (censor == 0)
                 {
                     ++e->cfar.cells_tested;
@@ -416,7 +710,7 @@ void pwr_cfar_run(struct PWR_Engine* e)
             {
                 pwr_real* buf = e->cfar.train_scratch;
                 uint32_t cnt = 0u, lo, hi, i, used = 0u;
-                double acc = 0.0, noise_est, alpha, threshold;
+                double acc = 0.0, noise_est, alpha, threshold, unbias = 1.0;
                 int32_t dr;
 
                 for (dr = -Hr; dr <= Hr; ++dr)
@@ -426,18 +720,30 @@ void pwr_cfar_run(struct PWR_Engine* e)
                     if (rr < 0 || rr >= (int32_t)nr) { continue; }
                     if (cnt < e->cfar.train_capacity) { buf[cnt++] = row[rr]; }
                 }
-                if (cnt == 0u) { thr[r] = (pwr_real)1.0e30; continue; }
+                if (cnt == 0u)
+                {
+                    thr[r] = (pwr_real)1.0e30;
+                    nse[r] = (pwr_real)1.0e30;
+                    continue;
+                }
 
-                lo = (uint32_t)pwr_maxi(0, cf->trim_low);
-                hi = (uint32_t)pwr_maxi(0, cf->trim_high);
-                if (lo + hi >= cnt) { lo = 0u; hi = 0u; }
+                pwr_tm_trim(cf, cnt, &lo, &hi);
                 pwr_sort_f32(buf, cnt);
                 for (i = lo; i + hi < cnt; ++i) { acc += (double)buf[i]; ++used; }
-                if (used == 0u) { thr[r] = (pwr_real)1.0e30; continue; }
+                if (used == 0u)
+                {
+                    thr[r] = (pwr_real)1.0e30;
+                    nse[r] = (pwr_real)1.0e30;
+                    continue;
+                }
                 noise_est = acc / (double)used;
-                alpha     = pwr_alpha_cached(&ac, used);
+                /* Keyed on the raw reference count, not the post-trim count:
+                 * the exact expression needs both the window size and how much
+                 * of it was trimmed away. */
+                pwr_cfar_tuning(&e->cfar, cf, cnt, &alpha, &unbias);
                 threshold = noise_est * alpha * bias;
                 thr[r]    = (pwr_real)threshold;
+                nse[r]    = (pwr_real)(noise_est / unbias);
                 if (censor == 0)
                 {
                     ++e->cfar.cells_tested;
@@ -512,7 +818,6 @@ void pwr_cluster_run(struct PWR_Engine* e)
     const PWR_ClusterConfig* const cc = &e->cfg.cluster;
     const int32_t tol_r = cc->range_tolerance;
     const int32_t tol_d = cc->doppler_tolerance;
-    const double  noise_db = e->stats.measured_noise_floor_db;
     const uint32_t total = nr * nd;
     uint32_t idx, sp;
 
@@ -587,12 +892,19 @@ void pwr_cluster_run(struct PWR_Engine* e)
 
         {
             const double peak_db = (double)pwr_pow_to_db(acc.peak_pow);
-            const double snr_db  = peak_db - noise_db;
+            /* Measured against the CFAR's own local estimate of the
+             * interference mean in the peak cell, not against a global median
+             * of the map.  A global figure is biased by everything that varies
+             * across the map - the MTI filter's Doppler-shaped noise floor,
+             * the STC ramp, transmit eclipsing, a clutter ridge - and this
+             * number is both reported to the operator and gated on below. */
+            const double local_db = (double)pwr_pow_to_db(
+                e->cfar.noise_est[(size_t)acc.peak_j * nr + acc.peak_r]);
+            const double snr_db  = peak_db - local_db;
             double cen_r, cen_d;
             PWR_Detection* det;
 
             if (snr_db < cc->min_snr_db) { continue; }
-            if (e->detection_count >= PWR_MAX_DETECTIONS) { break; }
 
             /* Power-weighted centroid, refined by a parabolic fit on the dB
              * surface when the peak is interior. */
@@ -618,7 +930,31 @@ void pwr_cluster_run(struct PWR_Engine* e)
                             (double)e->rd_db[(size_t)jp * nr + acc.peak_r]);
             }
 
-            det = &e->detections[e->detection_count++];
+            if (e->detection_count < PWR_MAX_DETECTIONS)
+            {
+                det = &e->detections[e->detection_count++];
+            }
+            else
+            {
+                /* Table full.  Evict the weakest plot rather than abandoning
+                 * the scan: this loop walks the map in [Doppler][range] raster
+                 * order, so stopping here would keep whichever plots came
+                 * first - a systematic slice of the lowest Doppler rows, which
+                 * is to say the fastest-closing targets crowd out everything
+                 * behind them.  Under jamming, chaff or a mis-set Pfa that is
+                 * exactly when the survivors need to be the strongest. */
+                uint32_t weakest = 0u, q;
+                for (q = 1u; q < PWR_MAX_DETECTIONS; ++q)
+                {
+                    if (e->detections[q].snr_db < e->detections[weakest].snr_db)
+                    {
+                        weakest = q;
+                    }
+                }
+                ++e->stats.detections_dropped;
+                if (e->detections[weakest].snr_db >= snr_db) { continue; }
+                det = &e->detections[weakest];
+            }
             memset(det, 0, sizeof(*det));
             det->range_bin   = acc.peak_r;
             det->doppler_bin = acc.peak_j;
