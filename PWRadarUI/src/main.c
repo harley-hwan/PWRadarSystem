@@ -11,11 +11,79 @@
  * On Windows this links as a console subsystem application so --selftest output
  * is visible; the window is created either way.
  */
+#if !defined(_WIN32)
+#  if !defined(_POSIX_C_SOURCE)
+#    define _POSIX_C_SOURCE 200809L      /* sigaction */
+#  endif
+#endif
+
 #include "ui_app.h"
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if defined(_WIN32)
+#  include <windows.h>
+#endif
+
+/* --------------------------------------------------------------------------
+ *  Interruption
+ * --------------------------------------------------------------------------
+ *  Ctrl+C, a kill, or the console window closing would otherwise terminate the
+ *  process wherever it happened to be: the worker thread dies mid-CPI and
+ *  app_destroy never runs, so a --capture in progress leaves a half-written
+ *  image behind.  The handler does nothing but raise a flag - the only thing
+ *  that is safe in a signal context - and the main loop leaves through the
+ *  ordinary shutdown path, which joins the worker and frees every buffer.
+ *
+ *  This lives in the console, not in the library: a library that installs
+ *  signal handlers steals them from whatever application links it.
+ * ------------------------------------------------------------------------ */
+static volatile sig_atomic_t g_interrupted = 0;
+
+#if defined(_WIN32)
+static BOOL WINAPI on_console_ctrl(DWORD type)
+{
+    switch (type)
+    {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT:
+    case CTRL_CLOSE_EVENT:
+    case CTRL_LOGOFF_EVENT:
+    case CTRL_SHUTDOWN_EVENT:
+        g_interrupted = 1;
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+#else
+static void on_signal(int sig)
+{
+    (void)sig;
+    g_interrupted = 1;
+}
+#endif
+
+static void install_interrupt_handlers(void)
+{
+#if defined(_WIN32)
+    (void)SetConsoleCtrlHandler(on_console_ctrl, TRUE);
+#else
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_signal;
+    (void)sigemptyset(&sa.sa_mask);
+    /* No SA_RESTART: a blocking read in the platform layer should come back
+     * with EINTR so the loop notices the flag on this iteration. */
+    sa.sa_flags = 0;
+    (void)sigaction(SIGINT,  &sa, NULL);
+    (void)sigaction(SIGTERM, &sa, NULL);
+    (void)sigaction(SIGHUP,  &sa, NULL);
+#endif
+}
 
 static void print_usage(const char* argv0)
 {
@@ -102,6 +170,8 @@ int main(int argc, char** argv)
         return 3;
     }
 
+    install_interrupt_handlers();
+
     err[0] = '\0';
     if (app_create(&app, err, sizeof(err)) == 0)
     {
@@ -119,7 +189,18 @@ int main(int argc, char** argv)
     {
         int n = 0;
         int ok;
-        while (n < capture_frames && app_step(&app) != 0) { ++n; }
+        while (n < capture_frames && g_interrupted == 0 &&
+               app_step(&app) != 0) { ++n; }
+        /* Interrupted before the requested frame count: the image would not be
+         * the one that was asked for, so write nothing rather than something
+         * a regression check might accept. */
+        if (g_interrupted != 0 && n < capture_frames)
+        {
+            fprintf(stderr, "interrupted after %d of %d frames, "
+                            "%s not written\n", n, capture_frames, capture_path);
+            app_destroy(&app);
+            return 6;
+        }
         ok = app_write_ppm(&app, capture_path);
         printf("captured %d frames -> %s (%s)\n", n, capture_path,
                (ok != 0) ? "ok" : "FAILED");
@@ -127,8 +208,12 @@ int main(int argc, char** argv)
         return (ok != 0) ? 0 : 5;
     }
 
-    while (app_step(&app) != 0) { }
+    while (g_interrupted == 0 && app_step(&app) != 0) { }
 
+    if (g_interrupted != 0)
+    {
+        fprintf(stderr, "interrupted, shutting down\n");
+    }
     app_destroy(&app);
     return 0;
 }

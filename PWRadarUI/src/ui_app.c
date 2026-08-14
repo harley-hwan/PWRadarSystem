@@ -2150,6 +2150,13 @@ static void app_hotkeys(App* a)
 /* ==========================================================================
  *  Framebuffer capture
  * ========================================================================== */
+/* Writes through a sibling temporary and renames on success.
+ *
+ * The destination is the input of a headless regression check, so a partial
+ * file is worse than no file: a run killed part-way, or a full disk, would
+ * otherwise leave a truncated image with a valid-looking PPM header.  Every
+ * write is checked - ignoring fwrite and fclose lets a failed flush report
+ * success, which is the same failure wearing a different hat. */
 int app_write_ppm(const App* a, const char* path)
 {
     const uint32_t* px = ui_plat_pixels(a->plat);
@@ -2157,17 +2164,27 @@ int app_write_ppm(const App* a, const char* path)
     const int32_t h = ui_plat_height(a->plat);
     const int32_t stride = ui_plat_stride(a->plat);
     unsigned char* row;
-    FILE* f;
+    char*  tmp;
+    size_t plen;
+    FILE*  f;
     int32_t y, x;
+    int ok = 1;
 
     if (px == NULL || w < 1 || h < 1 || path == NULL) { return 0; }
-    f = fopen(path, "wb");
-    if (f == NULL) { return 0; }
-    row = (unsigned char*)malloc((size_t)w * 3u);
-    if (row == NULL) { (void)fclose(f); return 0; }
 
-    (void)fprintf(f, "P6\n%d %d\n255\n", (int)w, (int)h);
-    for (y = 0; y < h; ++y)
+    plen = strlen(path);
+    tmp  = (char*)malloc(plen + 5u);
+    if (tmp == NULL) { return 0; }
+    memcpy(tmp, path, plen);
+    memcpy(tmp + plen, ".tmp", 5u);
+
+    f = fopen(tmp, "wb");
+    if (f == NULL) { free(tmp); return 0; }
+    row = (unsigned char*)malloc((size_t)w * 3u);
+    if (row == NULL) { (void)fclose(f); (void)remove(tmp); free(tmp); return 0; }
+
+    if (fprintf(f, "P6\n%d %d\n255\n", (int)w, (int)h) < 0) { ok = 0; }
+    for (y = 0; ok != 0 && y < h; ++y)
     {
         const uint32_t* src = &px[(size_t)(uint32_t)y * (uint32_t)stride];
         for (x = 0; x < w; ++x)
@@ -2176,11 +2193,23 @@ int app_write_ppm(const App* a, const char* path)
             row[x * 3 + 1] = (unsigned char)((src[x] >> 8)  & 0xFFu);
             row[x * 3 + 2] = (unsigned char)( src[x]        & 0xFFu);
         }
-        (void)fwrite(row, 1u, (size_t)w * 3u, f);
+        if (fwrite(row, 1u, (size_t)w * 3u, f) != (size_t)w * 3u) { ok = 0; }
     }
     free(row);
-    (void)fclose(f);
-    return 1;
+    /* fclose flushes; a write error can surface only here. */
+    if (fclose(f) != 0) { ok = 0; }
+
+    if (ok != 0)
+    {
+        /* rename refuses an existing destination on Windows, so clear it
+         * first.  The window between the two is the price of staying inside
+         * ISO C rather than reaching for MoveFileEx. */
+        (void)remove(path);
+        if (rename(tmp, path) != 0) { ok = 0; }
+    }
+    if (ok == 0) { (void)remove(tmp); }
+    free(tmp);
+    return ok;
 }
 
 /* ==========================================================================

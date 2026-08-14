@@ -804,6 +804,11 @@ static void pwr_engine_try_apply_pending(PWR_Engine* e)
 /* ==========================================================================
  *  Worker thread
  * ========================================================================== */
+/* Longest the worker may sleep without re-testing the quit flag.  Bounds how
+ * long pwr_engine_destroy() can block; small enough to be imperceptible, large
+ * enough that slow-motion pacing costs a negligible number of wake-ups. */
+#define PWR_PACE_SLICE_S 0.005
+
 static void pwr_worker_main(void* arg)
 {
     PWR_Engine* e = (PWR_Engine*)arg;
@@ -848,18 +853,33 @@ static void pwr_worker_main(void* arg)
             }
             deadline += period;
             {
-                const double now = pwr_plat_now_s();
-                if (deadline > now)
+                const double now0 = pwr_plat_now_s();
+                if (deadline > now0)
                 {
-                    pwr_plat_sleep_s(deadline - now);
+                    /* Sleep in slices rather than for the whole period: the
+                     * quit flag is only tested between slices, so a single
+                     * long sleep would make pwr_engine_destroy() block for as
+                     * much as one pacing interval - 0.2 s at time_scale 0.05
+                     * and a full second at max_cpi_per_second = 1, which the
+                     * operator sees as the window hanging on close.  The final
+                     * slice is the exact remainder, so pwr_plat_sleep_s keeps
+                     * its sub-millisecond accuracy where it matters. */
+                    double now = now0;
+                    while (e->quit_flag == 0 && deadline > now)
+                    {
+                        const double rem = deadline - now;
+                        pwr_plat_sleep_s((rem > PWR_PACE_SLICE_S)
+                                         ? PWR_PACE_SLICE_S : rem);
+                        now = pwr_plat_now_s();
+                    }
                 }
-                else if (now - deadline > 0.25)
+                else if (now0 - deadline > 0.25)
                 {
                     /* Fell far behind: resynchronise instead of accumulating
                      * an unbounded backlog, and account the dropped frames. */
                     e->stats.frames_dropped +=
-                        (uint64_t)((now - deadline) / pwr_maxd(period, 1e-9));
-                    deadline = now;
+                        (uint64_t)((now0 - deadline) / pwr_maxd(period, 1e-9));
+                    deadline = now0;
                 }
             }
         }

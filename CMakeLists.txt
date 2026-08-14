@@ -174,10 +174,10 @@ endif()
 #  Solution / project folders so the generated .sln reads like the source tree
 # ----------------------------------------------------------------------------
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
-source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/PWRadarCore" PREFIX "src"
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/PWRadarCore"
              FILES ${PWR_CORE_SOURCES} ${PWR_CORE_PRIVATE_HEADERS}
                    ${PWR_CORE_PUBLIC_HEADERS})
-source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/PWRadarUI" PREFIX "src"
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/PWRadarUI"
              FILES ${PWR_UI_SOURCES} ${PWR_UI_HEADERS})
 
 # ============================================================================
