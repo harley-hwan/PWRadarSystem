@@ -189,6 +189,14 @@ if(BUILD_TESTING)
     set_tests_properties(core_selftest PROPERTIES
         TIMEOUT 180
         PASS_REGULAR_EXPRESSION "result: PASS")
+
+    # Scores every canned scenario against its ground truth with no window.
+    # The self-test proves the chain is right in isolation; this proves the
+    # nine scenarios still produce the track picture they are supposed to.
+    add_test(NAME scenario_score COMMAND PWRadarUI --score 30)
+    set_tests_properties(scenario_score PROPERTIES
+        TIMEOUT 600
+        PASS_REGULAR_EXPRESSION "result: PASS")
 endif()
 
 # ============================================================================

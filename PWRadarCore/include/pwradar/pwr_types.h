@@ -538,7 +538,56 @@ typedef struct PWR_Frame
 } PWR_Frame;
 
 /* ==========================================================================
- *  9.  Callbacks
+ *  9.  Truth-versus-track scoring
+ * ==========================================================================
+ *  The acceptance criteria for the canned scenarios are these numbers, so the
+ *  scorer lives in the library: a headless run, the console's Verify tab and
+ *  any regression harness have to score identically or the criteria mean
+ *  nothing.  Drive it by handing every published frame to pwr_scorer_update().
+ * ------------------------------------------------------------------------ */
+
+/** One simulated target's accumulated track score. */
+typedef struct PWR_TargetScore
+{
+    double   time_active_s;     /* integrated while the target was alive     */
+    double   time_tracked_s;    /* integrated while a track held it          */
+    double   completeness;      /* time_tracked / time_active, 0..1          */
+    double   first_seen_s;      /* -1 until the target first became active   */
+    double   first_track_s;     /* -1 until a track first held it            */
+    double   err_now_m;         /* this frame's pairing error, -1 unpaired   */
+    double   err_rms_m;         /* RMS pairing error over err_n frames       */
+    double   err_sum2;          /* running sum of squared errors             */
+    uint32_t err_n;
+    int32_t  truth_id;          /* 0 == free slot                            */
+    int32_t  paired_track_id;   /* 0 when no track holds it this frame       */
+    int32_t  active;
+    char     label[PWR_LABEL_LEN];
+} PWR_TargetScore;
+
+/** Whole-picture counts for the most recently scored frame. */
+typedef struct PWR_ScoreSummary
+{
+    uint32_t truth_active;      /* targets alive right now                   */
+    uint32_t truth_tracked;     /* of those, held by a track                 */
+    uint32_t redundant;         /* extra confirmed tracks on a held target   */
+    uint32_t spurious;          /* confirmed tracks no target claims         */
+} PWR_ScoreSummary;
+
+/** Scorer state.  A plain aggregate: the caller owns the storage and there is
+ *  nothing to release. */
+typedef struct PWR_Scorer
+{
+    PWR_TargetScore  targets[PWR_MAX_SIM_TARGETS];
+    double           gate_m;        /* pairing radius                        */
+    double           last_time_s;
+    uint64_t         last_sequence;
+    PWR_ScoreSummary summary;
+    int32_t          started;
+    int32_t          _pad0;
+} PWR_Scorer;
+
+/* ==========================================================================
+ *  10.  Callbacks
  * ========================================================================== */
 typedef void (*PWR_LogFn)(void* user, int32_t level, const char* message);
 

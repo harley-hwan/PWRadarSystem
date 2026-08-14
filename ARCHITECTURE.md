@@ -356,7 +356,7 @@ rdot(j) = lambda*PRF/(2n) * (j - n/2 + 1)
 정보·단위·눈금까지 전부 프레임 구조체에서 받으므로 레이다 지식이 필요 없고,
 코어는 표시 방법을 모른 채 데이터만 발행함.
 
-경계를 넘는 구조체 배치는 `PWR_ABI_VERSION`(현재 5)에 종속되며, UI가 시작 시
+경계를 넘는 구조체 배치는 `PWR_ABI_VERSION`(현재 6)에 종속되며, UI가 시작 시
 `pwr_abi_version()`을 자기 컴파일 값과 대조해 불일치면 실행을 거부함
 (`ui_app.c · app_create`).
 
@@ -2120,6 +2120,28 @@ clim_hi = clim_lo + 44.0;                    /* 창 폭도 고정 44 dB */
 | T7 | 도플러 축 캘리브레이션 | 속도 부호·스케일 오류 |
 | T8 | 잡음 전용 오경보율 | 임계 배수 공식 오류 |
 | T9 | 종단 추적 정확도 | 통합 회귀 |
+| T10 | CFAR 5종 각각의 달성 Pfa | 종류별 임계 배수를 CA에서 빌려 씀 |
+| T11 | 회전 시 드웰 병합 플롯 | 방위 중심화 붕괴, 스캔당 플롯 난립 |
+| T12 | 회전 시 트랙 수명주기 | 적립이 회전이 아닌 CPI 단위로 감, 종료 통보 누락 |
+| T13 | 이론 대비 탐지확률 | 링크예산·압축 캘리브레이션·코히런트 이득 오차 |
+| T14 | 시나리오 직렬화 왕복 | 필드 누락, double 정밀도 손실, 불량 파일 수용 |
+
+**T11·T12가 메우는 구멍이 가장 컸음.** T1–T10과 T13은 전부 정지응시로 도는데
+`scan_rate_rpm = 0`이면 `scan_period_s`가 정확히 0이 되어, `pwr_plots_dwell_merge()`는
+첫 문장에서 반환하고 `pwr_tracker_update()`는 정지 분기를 탐. 즉 **방위 빔
+스플리팅 중심화 전체와 스캔당 M-of-N 적립·스캔 노후화 은퇴가 통째로 미실행**
+상태였고, 그게 곧 기본 운용 형상(24 rpm)이 실행하는 경로였음. T12가 찍는
+`6 attempts over 6 scans (234 CPI/scan)`이 핵심 주장임 — CPI 단위 적립이었다면
+1400 부근이 나옴.
+
+**T13은 체인을 바깥에서 검사하는 유일한 케이스임.** 나머지가 전부 "체인이
+스스로와 일관적인가"를 보는 데 비해 T13은 측정 Pd를 비중심 카이제곱
+(Marcum Q1)과 맞춤. 기하로 손실을 전부 제거함 — 보어사이트, 0 앙각, 안테나
+지상고 0(패턴 이득 1), 정확한 거리빈(스트래들 없음), 시선속도 0에 사각 도플러
+테이퍼(코히런트 이득 정확히 N, 다른 빈의 DFT가 정확히 0이라 표적이 자기 참조창을
+오염시킬 수 없음). 임계값은 가정하지 않고 같은 형상을 표적 없이 한 번 더 돌려
+측정한 Pfa에서 `T = −ln(Pfa)`로 역산하므로 CFAR 손실이 흡수됨. 곡선 기울기가
+dB당 약 0.18이라 어디서든 0.5 dB 어긋나면 허용오차 0.09를 넘김.
 
 **T4가 특히 잘 설계됨** — 비용 행렬이 이렇게 생김.
 
@@ -2147,12 +2169,68 @@ T6 pulse compression range      truth 12000 m, peak 11992 m
 T7 Doppler axis calibration     truth -35.0 m/s, peak -34.6 m/s
 T8 CFAR false-alarm rate        design 1.0e-04, achieved 8.63e-05 over 614400 cells
 T9 end-to-end tracking          1 confirmed, best |dy| = 293 m
-9/9 cases passed
+T10 CFAR family multipliers     CA 1.00, GO 1.03, SO 0.97, OS 0.98, TM 1.04
+T11 rotating dwell plot         6 plots / 6 scans, az err mean 0.21 worst 0.33 deg
+T12 rotating track life cycle   6 attempts over 6 scans (234 CPI/scan), 1 termination
+T13 Pd versus theory            6dB 0.11/0.09, 8dB 0.30/0.27, 10dB 0.63/0.62, 12dB 0.93/0.93
+T14 scenario serialisation      round trip exact, invalid file refused
+14/14 cases passed
 ```
 
 수치는 컴파일러·최적화에 따라 변동하며 판정은 항목별 허용범위로 함. T8은 설계
 Pfa의 0.05배–20배 구간인데, 유한 표본 추정이고 클러스터링이 인접 경보를 병합하므로
 한 자릿수 이내 일치가 유효 범위임.
+
+### 6.1b 진실값 대비 채점 — 화면에서 배치로
+
+자체검증이 "체인이 옳은가"를 보는 반면, 시나리오 합격 기준은 "이 그림이
+맞는가"임. 그 숫자를 만드는 채점기는 **라이브러리 안(`pwr_score.c`)** 에 있고,
+콘솔의 Verify 탭과 `--score` 배치 실행이 **같은 `PWR_Scorer`** 를 씀 — 서로 다른
+채점기를 두면 기준 자체가 의미를 잃기 때문임.
+
+채점기는 발행된 프레임만 보고 엔진을 참조하지 않으므로 기록을 재생해 채점할 수도
+있음. 시간 적분은 프레임 자신의 시나리오 시각으로 하므로 같은 프레임을 두 번
+넘겨도 이중 계산되지 않고, 시각이 뒤로 가면(리셋·시나리오 재적재) 이어붙이지 않고
+새로 시작함.
+
+| 지표 | 정의 |
+|---|---|
+| completeness | 표적이 살아 있던 시간 중 트랙이 잡고 있던 비율 |
+| TTT | 표적이 처음 활성화된 뒤 트랙이 처음 잡기까지 |
+| rmse | 짝지어진 프레임들의 위치 오차 RMS |
+| spurious | 어떤 표적도 주장하지 않는 확정 트랙 |
+| redundant | 이미 다른 트랙이 잡은 표적에 겹쳐 앉은 확정 트랙 (분열 트랙) |
+
+두 가지가 의도적 설계임. **짝짓기는 탐욕법**임 — 할당 문제를 풀면 두 트랙이 표적을
+맞바꾼 상황을 가려주는데, 그건 추적기가 가장 나쁜 바로 그 지점임. 그리고
+**TENTATIVE 트랙은 짝짓기 대상이 아님** — 아직 M-of-N을 통과하지 않아 화면에도
+심볼이 없는 내부 상태이고, 이걸 세면 첫 플롯부터 "추적 중"이 되어 completeness와
+TTT가 무의미해짐. COASTING은 셈 — 선언된 뒤 놓친 드웰을 예측으로 버티는 것이
+바로 이 지표가 보상해야 할 경우임.
+
+`--score`는 CTest에 `scenario_score`로 등록되어 아홉 시나리오 전부를 30초씩
+돌림(약 100초). 판정은 회귀를 잡는 가장 약한 기준 하나 — 확정될 만큼 오래 살아
+있던 표적은 언젠가 트랙에 잡혀야 함. 예외는 **개시 억제 반경보다 가까운 쌍**으로,
+설계상 트랙 수준에서 분리되지 않으므로 "병합됨"으로 보고함(시나리오 4의 거리
+페어).
+
+### 6.1c 시나리오 영속화
+
+`pwr_serial.c`가 설정·환경·표적 목록을 평문 `key = value`로 오감. 이 구조체들은
+이미 고정폭 스칼라의 집합이고 `PWR_ABI_VERSION`으로 배치가 동결되어 있으므로,
+직렬화는 포맷이 아니라 **필드 테이블**임 — 읽기와 쓰기가 같은 테이블을 걸으므로
+"쓰기는 하는데 읽지는 않는 멤버"가 생길 수 없음.
+
+- 값은 **다시 읽었을 때 비트가 같아지는 가장 짧은 표기**로 씀. 엔진의 재구성
+  경로가 파생 double을 정확히 비교해 재할당 여부를 정하기 때문임.
+- 라이브러리는 파일을 열지 않음. 구조체 ↔ 호출자 버퍼만 오가고 파일은 응용의 일.
+- 언급되지 않은 키는 현재 값을 유지하므로 부분 파일은 패치처럼 동작함.
+- 읽은 값은 엔진에 닿기 전에 클램프·검증을 거치고, 실패하면 엔진은 손대지 않음.
+
+T14가 이걸 검사하는 방식이 요점임: 저장 → 다른 엔진에 적재 → 다시 저장 → **두
+텍스트가 바이트 단위로 같아야 함.** 필드 하나를 빠뜨리든 double 비트가 깎이든
+표적이 사라지든 전부 차이로 드러나고, 필드별 비교와 달리 멤버가 추가돼도 검사가
+낡지 않음.
 
 ### 6.2 시나리오 — 현상별 검증
 
@@ -2733,6 +2811,8 @@ Range-Doppler 맵의 `(도플러 5, 거리 834)` 위치가 **35.4 dB**로 뜸. �
 | **핫세터 (메일박스)** | `_set_cluster` · `_set_tracker` · `_set_scan_rate` · `_set_time_scale` · `_set_stc` · `_set_cursor_range_bin` | **논블로킹** |
 | **핫세터처럼 보이지만 블로킹** | `_set_mti` · `_set_windows` (항상), `_set_cfar` (참조창 변경 시), `_set_log` | 내부적으로 `reconfigure` 또는 `proc_lock`을 잡음 |
 | **시나리오** | `_set_environment` · `_get_environment` · `_target_add/update/remove/clear/count/at` · `pwr_scenario_name` · `_load_scenario` | 표적 변경자는 **블로킹** |
+| **영속화** | `pwr_config_save` (순수) · `_scenario_save` · `_scenario_load` | `_scenario_load`는 내부적으로 `reconfigure`를 거치므로 **블로킹** |
+| **채점** | `pwr_scorer_init` · `pwr_scorer_update` | 순수 — 발행된 프레임만 보고 엔진을 참조하지 않음 |
 | **프레임 소비** | `_frame_acquire` · `_frame_release` · `_frame_sequence` · `_get_stats` | 소비자 1스레드 |
 | **유틸리티** | `pwr_time_now_s` · `pwr_sleep_s` · `pwr_window_fill` · `pwr_fft_forward/_inverse` · `pwr_next_pow2` · `pwr_self_test` | 순수 |
 
@@ -2796,6 +2876,8 @@ CPI를 돌릴 수 있음 — 오프라인 분석이나 회귀 테스트에 쓰�
 | 링크 예산 | `pwr_config.c · pwr_snr_single_pulse_db` |
 | 시나리오 정의 | `pwr_scenario.c` |
 | 수치 자체검증 | `pwr_selftest.c` |
+| 진실값 대비 트랙 채점 | `pwr_score.c` |
+| 설정·시나리오 텍스트 입출력 | `pwr_serial.c` |
 | 화면 레이아웃·제어패널 | `ui_app.c` |
 | Verify 탭 채점 | `ui_app.c · app_verify_update` |
 | PPI 심볼로지·타원·리더 | `ui_ppi.c` |

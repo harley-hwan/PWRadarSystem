@@ -185,11 +185,38 @@ sudo apt install mingw-w64
 
 ```
 --selftest             코어 수치 검증 스위트 실행 후 종료 (CI 게이트용, 실패 시 non-zero)
+--score [초]           창 없이 시나리오를 돌려 진실값 대비 트랙 화면을 채점하고 종료
+                       (기본 30초. --scenario를 함께 주면 그 하나만, 없으면 전부)
 --scenario N           시작 시 N번 시나리오 로드
+--save-scenario FILE   현재 시나리오를 텍스트로 저장하고 종료
+--load-scenario FILE   시작 시 시나리오 파일 적용
 --list-scenarios       시나리오 목록 출력
 --capture N FILE       N 프레임 렌더 후 프레임버퍼를 PPM으로 저장하고 종료 (헤드리스 회귀 검증)
 --version / --help
 ```
+
+`--score`는 시나리오 합격 기준을 **기계가 읽을 수 있게** 만드는 통로임. 콘솔의
+Verify 탭과 **같은 `PWR_Scorer`** 를 쓰므로 숫자가 어긋날 수 없고, 창을 닫으면
+사라지던 값이 배치 실행에서 그대로 나옴. CTest에 `scenario_score`로 등록되어 있음.
+
+판정 기준은 회귀를 잡을 수 있는 가장 약한 것 하나임 — 확정될 만큼 오래 살아 있던
+표적은 언젠가 트랙에 잡혀야 함. 예외가 하나 있는데 이건 봐주기가 아니라 레이다에
+대한 진술임: **개시 억제 반경보다 가까운 두 표적은 설계상 트랙 수준에서 분리되지
+않으므로**, 그런 쌍의 두 번째는 "놓침"이 아니라 "이웃에 병합됨"으로 보고됨.
+시나리오 4의 거리 페어가 정확히 그 경우임.
+
+```sh
+./build/PWRadarUI --score 30                    # 아홉 시나리오 전부 채점
+./build/PWRadarUI --scenario 2 --score 60       # 하나만, 60초
+./build/PWRadarUI --scenario 2 --save-scenario base.txt
+./build/PWRadarUI --load-scenario base.txt --score 30
+```
+
+시나리오 파일은 평문 `key = value`임. 값은 **다시 읽었을 때 비트가 같아지는 가장
+짧은 표기**로 쓰이므로, 저장 후 로드한 시나리오는 캔드 시나리오와 플롯 개수까지
+동일하게 재현됨. 파일이 언급하지 않은 키는 현재 값을 유지하므로 일부만 적은
+파일은 패치처럼 동작하고, 읽은 값은 엔진에 닿기 전에 클램프·검증을 거침 — 검증에
+실패하면 엔진은 손대지 않고 거부됨.
 
 ---
 
@@ -854,7 +881,11 @@ T7 Doppler axis calibration     truth -35.0 m/s, peak -34.6 m/s
 T8 CFAR false-alarm rate        design 1.0e-04, achieved 8.63e-05 over 614400 cells
 T9 end-to-end tracking          1 confirmed, best |dy| = 293 m at t = 0.42 s
 T10 CFAR family multipliers     CA 1.00, GO 1.03, SO 0.97, OS 0.98, TM 1.04
-10/10 cases passed
+T11 rotating dwell plot         6 plots / 6 scans at 27 dB, az err mean 0.21 worst 0.33 deg
+T12 rotating track life cycle   confirmed 1, 6 attempts over 6 scans (234 CPI/scan), 1 termination report(s)
+T13 Pd versus theory            6dB 0.11/0.09, 8dB 0.30/0.27, 10dB 0.63/0.62, 12dB 0.93/0.93
+T14 scenario serialisation      3530 bytes, 6 targets both sides, round trip exact, invalid file refused
+14/14 cases passed
 ```
 
 각 항목은 통과 여부만 고정이고 수치는 컴파일러·최적화에 따라 변동. 판정
@@ -867,6 +898,28 @@ T10은 그보다 훨씬 좁게 0.5배–2배로 조임. 다섯 종류를 **임�
 참조창 12+12셀. 이러면 참조셀이 거의 독립이라 각 종류의 정확한 오경보식이 그대로
 성립하고, 배수를 잘못 쓰면 몇 배 단위로 어긋나 바로 잡힘. 넘겨쓴 CA 배수는
 TM에서 설계 Pfa의 19배, GO에서 0.19배였음(ARCHITECTURE 3.5절 표).
+
+**T11·T12는 회전 안테나 전용임.** T1–T10과 아래 T13은 전부 정지응시로 도는데,
+`scan_rate_rpm = 0`이면 `dm.scan_period_s`가 정확히 0이 되어
+
+- `pwr_plots_dwell_merge()`가 첫 문장에서 반환 → 방위 빔 스플리팅 중심화 전체가
+  실행되지 않음
+- `pwr_tracker_update()`의 `rotating`이 0 → 스캔당 M-of-N 적립과 스캔 노후화
+  은퇴가 실행되지 않음
+
+즉 **기본 운용 형상(24 rpm)이 곧 아무도 검사하지 않던 경로**였음. T12가 찍는
+`6 attempts over 6 scans (234 CPI/scan)`이 그 핵심 주장임 — 적립이 CPI가 아니라
+회전 단위로 일어나고 있고, CPI 단위였다면 1400 부근이 찍힘.
+
+**T13은 체인을 바깥에서 검사함.** 위의 항목들이 전부 "체인이 스스로와
+일관적인가"를 보는 데 비해, T13은 측정 Pd를 비중심 카이제곱(Marcum Q1) 예측과
+맞춰봄. 기하를 정해 손실을 전부 제거함 — 보어사이트·0 앙각·안테나 지상고 0(패턴
+이득 1), 정확한 거리빈(스트래들 없음), 시선속도 정확히 0에 사각 도플러 테이퍼
+(코히런트 이득 정확히 N, 그리고 다른 빈에서 DFT가 정확히 0이라 표적이 자기
+참조창을 오염시킬 수 없음). 임계값은 가정하지 않고 **같은 형상을 표적 없이 한 번
+더 돌려 측정한 Pfa에서 `T = −ln(Pfa)`로 역산**하므로 CFAR 손실이 흡수됨. 곡선의
+기울기가 dB당 약 0.18이라 링크예산·압축 캘리브레이션·코히런트 이득 어디서든 0.5 dB
+어긋나면 허용오차 0.09를 넘김.
 
 T4는 greedy 알고리즘이 7을 선택하는 3×4 문제를 사용(최적해 6). 증강경로 탐색의
 실제 동작 여부를 확인하기 위함. `pwr_selftest.c`의 주석은 greedy 결과를 8로
@@ -949,6 +1002,8 @@ PWRadarSystem/
 │       ├── pwr_config.c             기본값·검증·클램프·파생지표·링크예산
 │       ├── pwr_scenario.c           검증 시나리오 9종
 │       ├── pwr_selftest.c           수치 검증 스위트
+│       ├── pwr_score.c              진실값 대비 트랙 채점 (Verify 탭 = --score)
+│       ├── pwr_serial.c             설정·시나리오 ↔ 평문 텍스트 (필드 테이블)
 │       ├── pwr_guard.c              컴파일 타임 가드 전용 TU (코드 생성 없음).
 │       │                            <windows.h>를 먼저 인클루드해 이름 충돌을
 │       │                            검출하고, 상태코드 ABI 값과 PWR_Complex

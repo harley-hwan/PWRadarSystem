@@ -102,6 +102,14 @@ PWR_EXPORT(double)     pwr_max_range_for_snr(const PWR_RadarConfig* cfg,
                                              double rcs_m2,
                                              double required_snr_db);
 
+/** Writes @p cfg as flat `key = value` text into @p buf.  The length the text
+ *  needs, excluding the terminator, is always reported through @p out_len (may
+ *  be NULL), so passing buf == NULL is how you size the buffer.  Returns
+ *  PWR_ERR_CAPACITY_EXCEEDED when it did not fit.  Values are written to the
+ *  shortest form that reads back bit-identical. */
+PWR_EXPORT(PWR_Status) pwr_config_save(const PWR_RadarConfig* cfg,
+                                       char* buf, size_t cap, size_t* out_len);
+
 /* ==========================================================================
  *  3.  Engine life cycle
  * ========================================================================== */
@@ -205,6 +213,20 @@ PWR_EXPORT(PWR_Status) pwr_engine_target_at(const PWR_Engine* eng,
 PWR_EXPORT(const char*) pwr_scenario_name(uint32_t index);
 PWR_EXPORT(PWR_Status)  pwr_engine_load_scenario(PWR_Engine* eng, uint32_t index);
 
+/** Writes the whole run - radar configuration, environment and target list -
+ *  as flat text, with the same buffer contract as pwr_config_save(). */
+PWR_EXPORT(PWR_Status) pwr_engine_scenario_save(const PWR_Engine* eng,
+                                                char* buf, size_t cap,
+                                                size_t* out_len);
+
+/** Applies a scenario written by pwr_engine_scenario_save().  Keys the text
+ *  does not mention keep their current value, so a partial file is a patch.
+ *  The text is untrusted: it is clamped and validated first, and the engine is
+ *  left untouched if it does not survive.  The engine is reset on success. */
+PWR_EXPORT(PWR_Status) pwr_engine_scenario_load(PWR_Engine* eng,
+                                                const char* text,
+                                                char* err, size_t err_cap);
+
 /* ==========================================================================
  *  7.  Frame consumption
  * ========================================================================== */
@@ -225,7 +247,23 @@ PWR_EXPORT(PWR_Status) pwr_engine_get_stats(const PWR_Engine* eng,
                                             PWR_Stats* out);
 
 /* ==========================================================================
- *  8.  Utility exposed for the presentation layer
+ *  8.  Truth-versus-track scoring
+ * ========================================================================== */
+
+/** Prepares a scorer.  @p gate_m is the truth-to-track pairing radius; pass 0
+ *  for the default.  The caller owns the storage and there is nothing to
+ *  release. */
+PWR_EXPORT(PWR_Status) pwr_scorer_init(PWR_Scorer* scorer, double gate_m);
+
+/** Scores one published frame.  Integrates on the frame's own scenario clock,
+ *  so handing it the same frame twice is free (PWR_STATUS_NO_DATA) and a
+ *  scenario reload restarts the run rather than accumulating across the seam.
+ *  Results are read directly from PWR_Scorer::targets and ::summary. */
+PWR_EXPORT(PWR_Status) pwr_scorer_update(PWR_Scorer* scorer,
+                                         const PWR_Frame* frame);
+
+/* ==========================================================================
+ *  9.  Utility exposed for the presentation layer
  * ========================================================================== */
 
 /** Monotonic high-resolution seconds; identical clock the engine uses. */

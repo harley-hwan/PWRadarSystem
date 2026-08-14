@@ -102,156 +102,12 @@ static uint32_t app_scenario_count(void)
  * ========================================================================== */
 static void app_history_clear(App* a)
 {
-    uint32_t i;
     ui_pathset_clear(&a->track_paths);
     ui_pathset_clear(&a->truth_paths);
     ui_plot_history_clear(&a->plot_hist);
-    memset(a->scores, 0, sizeof(a->scores));
-    for (i = 0u; i < PWR_MAX_SIM_TARGETS; ++i)
-    {
-        a->scores[i].first_seen_s  = -1.0;
-        a->scores[i].first_track_s = -1.0;
-        a->scores[i].err_now_m     = -1.0;
-    }
-    a->ver_last_time_s   = 0.0;
-    a->ver_row_count     = 0;
-    a->ver_truth_active  = 0;
-    a->ver_truth_tracked = 0;
-    a->ver_spurious      = 0;
-    a->ver_redundant     = 0;
-}
-
-static App_TruthScore* app_score_slot(App* a, int32_t truth_id)
-{
-    App_TruthScore* dead = NULL;
-    uint32_t i;
-    for (i = 0u; i < PWR_MAX_SIM_TARGETS; ++i)
-    {
-        if (a->scores[i].truth_id == truth_id) { return &a->scores[i]; }
-        if (a->scores[i].truth_id == 0 && dead == NULL)
-        {
-            dead = &a->scores[i];
-        }
-    }
-    if (dead == NULL)
-    {
-        for (i = 0u; i < PWR_MAX_SIM_TARGETS; ++i)
-        {
-            if (a->scores[i].active == 0) { dead = &a->scores[i]; break; }
-        }
-    }
-    if (dead != NULL)
-    {
-        memset(dead, 0, sizeof(*dead));
-        dead->truth_id      = truth_id;
-        dead->first_seen_s  = -1.0;
-        dead->first_track_s = -1.0;
-        dead->err_now_m     = -1.0;
-    }
-    return dead;
-}
-
-/* Greedy truth-to-track pairing plus the per-target bookkeeping behind the
- * Verify tab: completeness, RMSE, time-to-first-track, spurious/redundant. */
-static void app_verify_update(App* a, double now, double dt)
-{
-    const PWR_Frame* f = &a->frame;
-    const double gate_m = 1500.0;       /* pairing radius, generous 3-sigma */
-    uint8_t used[PWR_MAX_TRACKS];
-    uint32_t i, k;
-
-    memset(used, 0, sizeof(used));
-    a->ver_truth_active  = 0;
-    a->ver_truth_tracked = 0;
-    a->ver_redundant     = 0;
-
-    /* Reclaim slots whose target no longer exists in the scenario (target
-     * list cleared or scenario reloaded): the published truth list always
-     * carries every current target, enabled or not. */
-    for (i = 0u; i < PWR_MAX_SIM_TARGETS; ++i)
-    {
-        int present = 0;
-        if (a->scores[i].truth_id == 0) { continue; }
-        for (k = 0u; k < f->truth_count; ++k)
-        {
-            if (f->truth[k].id == a->scores[i].truth_id) { present = 1; break; }
-        }
-        if (present == 0) { a->scores[i].truth_id = 0; }
-    }
-
-    for (i = 0u; i < f->truth_count; ++i)
-    {
-        const PWR_SimTarget* tg = &f->truth[i];
-        App_TruthScore* sc = app_score_slot(a, tg->id);
-        if (sc == NULL) { continue; }
-        (void)snprintf(sc->label, sizeof(sc->label), "%s", tg->label);
-        sc->active = tg->enabled;
-        if (tg->enabled == 0)
-        {
-            sc->paired_track = 0;
-            sc->err_now_m    = -1.0;
-            continue;
-        }
-        ++a->ver_truth_active;
-        if (sc->first_seen_s < 0.0) { sc->first_seen_s = now; }
-        sc->time_active_s += dt;
-
-        {
-            double best = gate_m;
-            int32_t bi = -1;
-            for (k = 0u; k < f->track_count; ++k)
-            {
-                double dx, dy, d;
-                if (used[k] != 0u) { continue; }
-                dx = f->tracks[k].x_m - tg->x_m;
-                dy = f->tracks[k].y_m - tg->y_m;
-                d  = sqrt(dx * dx + dy * dy);
-                if (d < best) { best = d; bi = (int32_t)k; }
-            }
-            if (bi >= 0)
-            {
-                used[bi] = 1u;
-                sc->paired_track    = (int32_t)f->tracks[bi].id;
-                sc->err_now_m       = best;
-                sc->err_sum2       += best * best;
-                ++sc->err_n;
-                sc->time_tracked_s += dt;
-                if (sc->first_track_s < 0.0) { sc->first_track_s = now; }
-                ++a->ver_truth_tracked;
-                /* Additional confirmed tracks inside the same gate hold the
-                 * same target twice: redundancy, the classic split-track
-                 * failure the init-inhibit radius is meant to prevent. */
-                for (k = 0u; k < f->track_count; ++k)
-                {
-                    double dx, dy;
-                    if (used[k] != 0u) { continue; }
-                    if (f->tracks[k].state != PWR_TRACK_CONFIRMED) { continue; }
-                    dx = f->tracks[k].x_m - tg->x_m;
-                    dy = f->tracks[k].y_m - tg->y_m;
-                    if (sqrt(dx * dx + dy * dy) < gate_m)
-                    {
-                        used[k] = 1u;
-                        ++a->ver_redundant;
-                    }
-                }
-            }
-            else
-            {
-                sc->paired_track = 0;
-                sc->err_now_m    = -1.0;
-            }
-        }
-    }
-
-    /* Confirmed tracks that no truth claims are spurious (false tracks). */
-    a->ver_spurious = 0;
-    for (k = 0u; k < f->track_count; ++k)
-    {
-        if (used[k] == 0u && f->tracks[k].state == PWR_TRACK_CONFIRMED)
-        {
-            ++a->ver_spurious;
-        }
-    }
+    (void)pwr_scorer_init(&a->verify, 0.0);
+    a->ver_row_count    = 0;
+    a->hist_last_time_s = 0.0;
 }
 
 /* Feeds one newly published frame into the display history. */
@@ -260,13 +116,12 @@ static void app_history_feed(App* a)
     const PWR_Frame* f = &a->frame;
     const double now = f->time_s;
     const double min_step = 25.0;       /* path decimation, metres */
-    double dt;
     uint32_t i;
 
-    /* Scenario time moved backwards: the engine was reset under us. */
-    if (now + 1e-6 < a->ver_last_time_s) { app_history_clear(a); }
-    dt = (a->ver_last_time_s > 0.0) ? (now - a->ver_last_time_s) : 0.0;
-    if (dt < 0.0 || dt > 10.0) { dt = 0.0; }
+    /* Scenario time moved backwards: the engine was reset under us.  The
+     * scorer detects the same seam for itself, but the drawn history is the
+     * console's own and has to be dropped here. */
+    if (now + 1e-6 < a->hist_last_time_s) { app_history_clear(a); }
 
     ui_pathset_begin_frame(&a->track_paths);
     ui_pathset_begin_frame(&a->truth_paths);
@@ -297,8 +152,8 @@ static void app_history_feed(App* a)
     }
     ui_plot_history_prune(&a->plot_hist, now, a->hist_retain_s);
 
-    app_verify_update(a, now, dt);
-    a->ver_last_time_s = now;
+    (void)pwr_scorer_update(&a->verify, f);
+    a->hist_last_time_s = now;
 }
 
 /* ==========================================================================
@@ -1403,15 +1258,15 @@ static void app_cell_verify(void* user, int32_t row, int32_t col,
                             char* out, size_t cap, UI_Color* fg)
 {
     App* a = (App*)user;
-    const App_TruthScore* sc;
+    const PWR_TargetScore* sc;
     const char* st;
     UI_Color sc_col;
 
     if (row < 0 || row >= a->ver_row_count) { return; }
-    sc = &a->scores[a->ver_rows[row]];
+    sc = &a->verify.targets[a->ver_rows[row]];
 
     if (sc->active == 0)                  { st = "OUT";    sc_col = UI_C_TEXT_FAINT; }
-    else if (sc->paired_track != 0)       { st = "TRACK";  sc_col = UI_C_TRACK_CONF; }
+    else if (sc->paired_track_id != 0)    { st = "TRACK";  sc_col = UI_C_TRACK_CONF; }
     else if (sc->first_track_s >= 0.0)    { st = "LOST";   sc_col = UI_C_ALARM; }
     else                                  { st = "SEARCH"; sc_col = UI_C_WARN; }
     *fg = sc_col;
@@ -1423,9 +1278,9 @@ static void app_cell_verify(void* user, int32_t row, int32_t col,
         *fg = UI_C_TRUTH;
         break;
     case 1:
-        if (sc->paired_track != 0)
+        if (sc->paired_track_id != 0)
         {
-            (void)snprintf(out, cap, "T%03d", sc->paired_track);
+            (void)snprintf(out, cap, "T%03d", sc->paired_track_id);
         }
         else { (void)snprintf(out, cap, "-"); }
         break;
@@ -1441,7 +1296,7 @@ static void app_cell_verify(void* user, int32_t row, int32_t col,
         if (sc->err_n > 0u)
         {
             (void)snprintf(out, cap, "%.0f",
-                           sqrt(sc->err_sum2 / (double)sc->err_n));
+                           sc->err_rms_m);
         }
         else { (void)snprintf(out, cap, "-"); }
         break;
@@ -1449,7 +1304,7 @@ static void app_cell_verify(void* user, int32_t row, int32_t col,
         if (sc->time_active_s > 0.0)
         {
             (void)snprintf(out, cap, "%.0f",
-                           100.0 * sc->time_tracked_s / sc->time_active_s);
+                           100.0 * sc->completeness);
         }
         else { (void)snprintf(out, cap, "-"); }
         break;
@@ -1586,7 +1441,8 @@ static void app_draw_right(App* a, UI_Rect r)
         a->ver_row_count = 0;
         for (i = 0; i < (int32_t)PWR_MAX_SIM_TARGETS; ++i)
         {
-            if (a->scores[i].truth_id != 0 && a->scores[i].first_seen_s >= 0.0)
+            if (a->verify.targets[i].truth_id != 0 &&
+                a->verify.targets[i].first_seen_s >= 0.0)
             {
                 a->ver_rows[a->ver_row_count++] = i;
             }
@@ -1600,22 +1456,27 @@ static void app_draw_right(App* a, UI_Rect r)
             ui_stack_begin(&st, ui_rect(body.x + 6, tbl.y + tbl.h + 4,
                                         body.w - 12, foot_h - 4), 0);
             (void)snprintf(buf, sizeof(buf), "%d / %d",
-                           a->ver_truth_tracked, a->ver_truth_active);
+                           a->verify.summary.truth_tracked,
+                           a->verify.summary.truth_active);
             ui_readout(c, ui_stack_row(&st, 17), "truth under track", buf,
-                       (a->ver_truth_active > 0 &&
-                        a->ver_truth_tracked == a->ver_truth_active)
+                       (a->verify.summary.truth_active > 0u &&
+                        a->verify.summary.truth_tracked ==
+                            a->verify.summary.truth_active)
                            ? UI_C_OK : UI_C_WARN);
-            (void)snprintf(buf, sizeof(buf), "%d", a->ver_spurious);
+            (void)snprintf(buf, sizeof(buf), "%u", a->verify.summary.spurious);
             ui_readout(c, ui_stack_row(&st, 17), "spurious confirmed", buf,
-                       (a->ver_spurious > 0) ? UI_C_ALARM : UI_C_TEXT_DIM);
-            (void)snprintf(buf, sizeof(buf), "%d", a->ver_redundant);
+                       (a->verify.summary.spurious > 0u) ? UI_C_ALARM
+                                                        : UI_C_TEXT_DIM);
+            (void)snprintf(buf, sizeof(buf), "%u", a->verify.summary.redundant);
             ui_readout(c, ui_stack_row(&st, 17), "redundant tracks", buf,
-                       (a->ver_redundant > 0) ? UI_C_WARN : UI_C_TEXT_DIM);
+                       (a->verify.summary.redundant > 0u) ? UI_C_WARN
+                                                         : UI_C_TEXT_DIM);
             {
                 double comp = 0.0, act = 0.0;
                 for (i = 0; i < a->ver_row_count; ++i)
                 {
-                    const App_TruthScore* sc = &a->scores[a->ver_rows[i]];
+                    const PWR_TargetScore* sc =
+                        &a->verify.targets[a->ver_rows[i]];
                     comp += sc->time_tracked_s;
                     act  += sc->time_active_s;
                 }
