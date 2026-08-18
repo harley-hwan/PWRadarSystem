@@ -126,6 +126,13 @@ typedef struct App
     double              last_frame_s;
     char                selftest[2048];
     PWR_Status          selftest_status;
+    /* The start-up self test runs on the first idle after a frame has been
+     * presented, never inside app_create.  Run there, the window exists but
+     * has not painted for as long as the suite takes - which is a second in an
+     * optimised build and minutes in an unoptimised one - and an unpainted
+     * window is a black rectangle indistinguishable from a hang. */
+    int32_t             selftest_pending;
+    int32_t             frames_drawn;
 } App;
 
 /** Creates the window, the engine and every view.  Returns 0 on failure with a

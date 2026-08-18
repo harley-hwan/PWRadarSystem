@@ -48,6 +48,12 @@ PWR_EXPORT(PWR_Status) pwr_config_default(PWR_RadarConfig* cfg)
     cfg->receiver_bandwidth_hz = 0.0;       /* 0 -> use sample_rate_hz       */
     cfg->azimuth_beamwidth_deg   = 1.6;
     cfg->elevation_beamwidth_deg = 20.0;
+    /* No tilt and no fill by default: a plain Gaussian beam on the horizon.
+     * Both are opt-in so that every published figure in the documentation
+     * describes the configuration the defaults actually build. */
+    cfg->elevation_tilt_deg  = 0.0;
+    cfg->elevation_csc2_deg  = 0.0;
+    cfg->sidelobe_level_db   = -45.0;
     cfg->antenna_height_m    = 25.0;
     cfg->scan_rate_rpm       = 24.0;        /* 2.5 s scan period             */
 
@@ -136,6 +142,14 @@ PWR_EXPORT(PWR_Status) pwr_sim_environment_default(PWR_SimEnvironment* env)
     env->clutter_spread_hz     = 12.0;
     env->rain_rate_mmph        = 0.0;
     env->rain_extent_km        = 8.0;
+    env->refraction_k          = 4.0 / 3.0;     /* standard atmosphere */
+    env->clutter_mean_doppler_hz = 0.0;
+    env->sea_shape_nu          = 0.0;           /* Rayleigh unless asked    */
+    env->land_clutter_to_noise_db = 45.0;
+    env->land_spread_hz        = 1.0;           /* terrain barely moves     */
+    env->land_bearing_deg      = 0.0;
+    env->land_width_deg        = 0.0;           /* no land: open sea        */
+    env->land_range_min_m      = 3000.0;
     env->jammer_azimuth_deg    = 120.0;
     env->jammer_power_db       = 15.0;
     env->jammer_bandwidth_frac = 1.0;
@@ -179,6 +193,9 @@ PWR_EXPORT(PWR_Status) pwr_config_clamp(PWR_RadarConfig* cfg)
     cfg->system_loss_db  = pwr_clampd(cfg->system_loss_db, 0.0, 30.0);
     cfg->azimuth_beamwidth_deg   = pwr_clampd(cfg->azimuth_beamwidth_deg, 0.2, 30.0);
     cfg->elevation_beamwidth_deg = pwr_clampd(cfg->elevation_beamwidth_deg, 0.5, 90.0);
+    cfg->elevation_tilt_deg = pwr_clampd(cfg->elevation_tilt_deg, -30.0, 60.0);
+    cfg->elevation_csc2_deg = pwr_clampd(cfg->elevation_csc2_deg, 0.0, 85.0);
+    cfg->sidelobe_level_db  = pwr_clampd(cfg->sidelobe_level_db, -80.0, -10.0);
     cfg->antenna_height_m = pwr_clampd(cfg->antenna_height_m, 0.0, 2000.0);
     cfg->scan_rate_rpm    = pwr_clampd(cfg->scan_rate_rpm, 0.0, 120.0);
 
@@ -229,6 +246,7 @@ PWR_EXPORT(PWR_Status) pwr_config_clamp(PWR_RadarConfig* cfg)
 
     cfg->tracker.assoc_mode = pwr_clampi(cfg->tracker.assoc_mode, 0,
                                          PWR_ASSOC_COUNT - 1);
+
     cfg->tracker.process_noise_accel =
         pwr_clampd(cfg->tracker.process_noise_accel, 0.01, 200.0);
     cfg->tracker.meas_sigma_range_m =

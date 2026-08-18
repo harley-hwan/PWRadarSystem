@@ -46,6 +46,32 @@ static void pwr_add_polar(PWR_Engine* e, const char* label,
             rcs, swerling, cls);
 }
 
+/* Gives the target just added a hull, so its echo spans several range cells
+ * instead of one.  A 2000 m2 ship really is 150 m long, and until the plot
+ * extractor is handed something that wide its clustering tolerances and its
+ * maximum-cluster reject have never been stimulated by anything. */
+static void pwr_extent(PWR_Engine* e, double length_m, int32_t scatterers)
+{
+    PWR_SimTarget t;
+    const uint32_t n = pwr_engine_target_count(e);
+    if (n == 0u) { return; }
+    if (pwr_engine_target_at(e, n - 1u, &t) != PWR_STATUS_OK) { return; }
+    t.length_m   = length_m;
+    t.scatterers = scatterers;
+    (void)pwr_engine_target_update(e, &t);
+}
+
+/* Gives the target just added a rate of turn. */
+static void pwr_turn(PWR_Engine* e, double turn_rate_dps)
+{
+    PWR_SimTarget t;
+    const uint32_t n = pwr_engine_target_count(e);
+    if (n == 0u) { return; }
+    if (pwr_engine_target_at(e, n - 1u, &t) != PWR_STATUS_OK) { return; }
+    t.turn_rate_dps = turn_rate_dps;
+    (void)pwr_engine_target_update(e, &t);
+}
+
 static void pwr_env(PWR_Engine* e, int sea, double cnr_db, int rain, int jam)
 {
     PWR_SimEnvironment env;
@@ -90,8 +116,10 @@ static void pwr_sc_maritime(PWR_Engine* e)
     pwr_env(e, 3, 26.0, 0, 0);
     pwr_add_polar(e, "SHIP-01",  20.0,  6500.0, 8.0,  110.0,  7.0,
                   2000.0, PWR_SWERLING_1, PWR_CLASS_SURFACE);
+    pwr_extent(e, 150.0, 10);                    /* a 2000 m2 ship is long */
     pwr_add_polar(e, "SHIP-02", 118.0, 11500.0, 6.0,  300.0, 11.0,
                   800.0,  PWR_SWERLING_1, PWR_CLASS_SURFACE);
+    pwr_extent(e, 110.0, 8);
     pwr_add_polar(e, "BOAT-03", 250.0,  4200.0, 3.0,   35.0, 14.0,
                   25.0,   PWR_SWERLING_3, PWR_CLASS_SURFACE);
     pwr_add_polar(e, "BUOY-04", 305.0,  8800.0, 2.0,    0.0,  0.0,
@@ -110,10 +138,17 @@ static void pwr_sc_mixed(PWR_Engine* e)
                   4.0,    PWR_SWERLING_2, PWR_CLASS_AIR);
     pwr_add_polar(e, "HELO-03", 200.0,  9000.0,  600.0,  95.0,  55.0,
                   12.0,   PWR_SWERLING_3, PWR_CLASS_ROTARY);
+    /* Orbiting: the one target in the nominal picture that the tracker's
+     * constant-velocity model cannot follow exactly, so the scan-to-scan lag
+     * of a manoeuvre is visible in the ordinary operating case rather than
+     * only in a contrived one. */
+    pwr_turn(e, 4.0);
     pwr_add_polar(e, "SHIP-04",  80.0,  7500.0,    8.0, 250.0,   9.0,
                   1500.0, PWR_SWERLING_1, PWR_CLASS_SURFACE);
+    pwr_extent(e, 140.0, 10);
     pwr_add_polar(e, "SHIP-05", 300.0, 13000.0,    8.0,  60.0,  12.0,
                   900.0,  PWR_SWERLING_1, PWR_CLASS_SURFACE);
+    pwr_extent(e, 115.0, 8);
     pwr_add_polar(e, "UAV-06",  340.0, 11000.0, 1200.0, 160.0,  38.0,
                   0.6,    PWR_SWERLING_3, PWR_CLASS_UAV);
 }

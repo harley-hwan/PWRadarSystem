@@ -51,6 +51,11 @@ void       pwr_waveform_release(PWR_Waveform* wf);
 typedef struct PWR_SimTargetState
 {
     double   x, y, z;             /* propagated position                      */
+    /* Propagated velocity.  It lives here rather than in PWR_SimTarget because
+     * acceleration and rate of turn make it a state, not a definition: the
+     * target struct keeps the launch condition and this keeps where the target
+     * has got to. */
+    double   vx, vy, vz;
     double   amp_scale;           /* current Swerling fluctuation             */
     double   next_scan_update_s;  /* scan-to-scan fluctuation bookkeeping     */
     int32_t  active;
@@ -72,8 +77,21 @@ typedef struct PWR_Simulator
      * range-cell to range-cell.  One phasor per range cell.               */
     PWR_Complex*       clutter_state;      /* [n_range] one per range gate  */
     pwr_real*          clutter_power;      /* [n_range] mean power, linear   */
+    /* Compound-K texture: a slowly varying, unit-mean Gamma modulation of the
+     * Gaussian speckle, redrawn once a scan because sea texture decorrelates
+     * in seconds while the speckle decorrelates in milliseconds.  Unity
+     * everywhere while the shape parameter leaves the field Rayleigh. */
+    pwr_real*          clutter_texture;    /* [n_range]                      */
+    double             texture_next_s;
     uint32_t           clutter_cells;
     double             clutter_rho;        /* pulse-to-pulse correlation    */
+    /* Running phase of the bulk clutter Doppler, carried across CPIs so the
+     * drift is continuous rather than restarting every batch. */
+    double             clutter_phase;
+    /* Spectral width in force this CPI: land and sea differ by more than an
+     * order of magnitude, and which one applies depends on where the beam is
+     * pointing. */
+    double             clutter_spread_now_hz;
 } PWR_Simulator;
 
 /* ==========================================================================
@@ -423,6 +441,18 @@ void       pwr_sim_reset(PWR_Simulator* s, const PWR_RadarConfig* cfg);
 
 /** Integrates every active target forward by @p dt seconds. */
 void       pwr_sim_advance(PWR_Simulator* s, double dt, double now_s);
+
+/** Total clutter spectral width: internal motion and antenna scan modulation
+ *  in quadrature.  Exposed so the console can show what the rotation rate is
+ *  costing the MTI. */
+double     pwr_sim_clutter_spread_hz(const PWR_RadarConfig* cfg,
+                                     double internal_hz);
+
+/** Recomputes the pulse-to-pulse clutter correlation from the current
+ *  environment and geometry.  Must be called whenever the spectral width, the
+ *  PRF, the beamwidth or the scan rate moves. */
+void       pwr_sim_update_clutter_rho(PWR_Simulator* s,
+                                      const PWR_RadarConfig* cfg);
 
 /** Generates one CPI of complex baseband receiver output into e->rx. */
 void       pwr_sim_generate_cpi(struct PWR_Engine* e);

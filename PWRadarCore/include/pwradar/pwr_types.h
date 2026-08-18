@@ -23,6 +23,7 @@ extern "C" {
  *  0.  Compile-time limits (part of the ABI)
  * ========================================================================== */
 #define PWR_MAX_SIM_TARGETS         64u
+#define PWR_MAX_SCATTERERS          32     /* per extended target          */
 #define PWR_MAX_DETECTIONS          512u
 #define PWR_MAX_TRACKS              128u
 #define PWR_TRACK_TRAIL_LEN         64u     /* PPI history trail points     */
@@ -43,6 +44,7 @@ extern "C" {
 #define PWR_T0_KELVIN               290.0           /* reference temperature */
 #define PWR_PI                      3.14159265358979323846
 #define PWR_TWO_PI                  6.28318530717958647692
+#define PWR_EARTH_RADIUS_M          6371000.0       /* mean radius          */
 
 /* ==========================================================================
  *  1.  Elementary numeric types
@@ -260,6 +262,20 @@ typedef struct PWR_RadarConfig
     double   receiver_bandwidth_hz; /* 0 => use sample_rate_hz                */
     double   azimuth_beamwidth_deg;
     double   elevation_beamwidth_deg;
+    /* Elevation boresight.  0 points at the horizon, which is where a
+     * surveillance set with no fill normally sits. */
+    double   elevation_tilt_deg;
+    /* Upper edge of a cosecant-squared fill, in degrees of elevation; 0
+     * disables it and leaves a plain Gaussian beam.  Above the mainlobe edge
+     * the gain then falls as (sin(edge)/sin(theta))^2, which is exactly what
+     * holds received power constant for a target at fixed altitude as it
+     * closes - the reason surveillance antennas are shaped this way. */
+    double   elevation_csc2_deg;
+    /* One-way sidelobe level the pattern envelope is anchored at.  The
+     * envelope decays as 1/theta^2 beyond that point; it carries no discrete
+     * lobes or nulls, so it supports a sidelobe *level* argument but not
+     * sidelobe blanking or cancellation. */
+    double   sidelobe_level_db;
     double   antenna_height_m;
     double   scan_rate_rpm;         /* mechanical rotation, 0 => staring      */
 
@@ -345,6 +361,20 @@ typedef struct PWR_SimTarget
     double   rcs_m2;                /* mean radar cross-section               */
     double   spawn_time_s;          /* becomes active at this scenario time   */
     double   lifetime_s;            /* <=0 => forever                         */
+    /* Manoeuvre.  Velocity is integrated from these rather than held fixed, so
+     * a target can accelerate and turn - which is the only way a constant-
+     * velocity tracker can be stressed, and the only way an interacting-model
+     * filter would have anything to prove itself against. */
+    double   accel_mps2;            /* along-track, + speeds up               */
+    double   turn_rate_dps;         /* + turns to starboard (clockwise)       */
+    /* Extent.  A target longer than a resolution cell is modelled as a row of
+     * scattering centres along its own body axis, each with its own delay and
+     * its own carrier phase - so it occupies several range cells, and the
+     * centres interfere as the aspect changes, which is where glint and
+     * aspect-dependent fluctuation come from.  Zero length or fewer than two
+     * centres leaves the classic point scatterer. */
+    double   length_m;
+    int32_t  scatterers;
     int32_t  id;                    /* caller supplied, unique                */
     int32_t  swerling;              /* PWR_Swerling                            */
     int32_t  target_class;          /* PWR_TargetClass                         */
@@ -362,8 +392,35 @@ typedef struct PWR_SimEnvironment
      * sea_state and clutter_to_noise_db below. */
     double   clutter_to_noise_db;   /* CNR at the first range gate            */
     double   clutter_spread_hz;     /* internal clutter motion spectral width */
+    /* Bulk drift of the surface field.  A sea running before the wind is not
+     * centred on zero Doppler, and a clutter model that puts it there makes
+     * the MTI notch a free win - the one assumption that most flatters a
+     * canceller, and the reason chaff is dangerous. */
+    double   clutter_mean_doppler_hz;
+    /* K-distribution shape for the sea.  The speckle is always complex
+     * Gaussian; this modulates it with a slowly varying Gamma texture of unit
+     * mean, which is what makes real sea clutter spiky.  <= 0 leaves the field
+     * Rayleigh, in which case the detector and the simulator share one
+     * assumption and any Pfa measured against it is self-fulfilling.  Small
+     * values are spikier: 0.1-1 is a rough sea seen at low grazing, 10 and
+     * above is indistinguishable from Rayleigh. */
+    double   sea_shape_nu;
+    /* Land sector.  Land clutter is stronger than sea, very nearly stationary,
+     * and it hides the sea behind it - so a bearing with land on it carries a
+     * different level, a different spectrum and a coastline.  A width of zero
+     * means no land, which is the default and matches an open-sea picture. */
+    double   land_clutter_to_noise_db;
+    double   land_spread_hz;
+    double   land_bearing_deg;
+    double   land_width_deg;
+    double   land_range_min_m;      /* coastline range on those bearings      */
     double   rain_rate_mmph;
     double   rain_extent_km;
+    /* Effective-earth factor.  4/3 is the standard atmosphere; raise it for a
+     * trapping layer, lower it for sub-refraction.  It sets both the height
+     * correction applied to every target and the radar horizon beyond which a
+     * target falls into the diffraction shadow. */
+    double   refraction_k;
     double   jammer_azimuth_deg;
     double   jammer_power_db;       /* broadband noise jamming, JNR           */
     double   jammer_bandwidth_frac; /* 0..1 of the receiver band              */

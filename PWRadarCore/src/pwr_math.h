@@ -189,6 +189,10 @@ double   pwr_rng_exponential(PWR_Rng* r);
  *  reproduces the exponential, k == 2 the Swerling 3/4 distribution. */
 double   pwr_rng_chi2_norm(PWR_Rng* r, uint32_t k);
 
+/** Unit-mean Gamma variate of arbitrary (non-integer) shape.  The texture
+ *  half of a compound K-distributed clutter field. */
+double   pwr_rng_gamma(PWR_Rng* r, double shape);
+
 /** Zero-mean circular complex Gaussian with total power @p power
  *  (i.e. E[|z|^2] == power). */
 PWR_Complex pwr_rng_cgauss(PWR_Rng* r, double power);

@@ -551,6 +551,11 @@ void pwr_frame_publish(struct PWR_Engine* e)
             dst->x_m = e->sim.state[i].x;
             dst->y_m = e->sim.state[i].y;
             dst->z_m = e->sim.state[i].z;
+            /* Current velocity, so a consumer scoring a manoeuvre sees the
+             * course the target is actually flying rather than its launch. */
+            dst->vx_mps = e->sim.state[i].vx;
+            dst->vy_mps = e->sim.state[i].vy;
+            dst->vz_mps = e->sim.state[i].vz;
             dst->enabled = (e->sim.targets[i].enabled != 0 &&
                             e->sim.state[i].active != 0) ? 1 : 0;
             ++out;
@@ -805,13 +810,7 @@ static void pwr_engine_apply_pending_locked(PWR_Engine* e)
     if ((flags & PWR_PENDING_ENV) != 0u)
     {
         e->sim.env = env;
-        /* Pulse-to-pulse clutter correlation for the new spectrum width. */
-        {
-            const double pri = 1.0 / e->cfg.prf_hz;
-            const double a   = PWR_PI *
-                pwr_maxd(e->sim.env.clutter_spread_hz, 0.0) * pri;
-            e->sim.clutter_rho = pwr_clampd(exp(-2.0 * a * a), 0.0, 0.999999);
-        }
+        pwr_sim_update_clutter_rho(&e->sim, &e->cfg);
     }
     if ((flags & PWR_PENDING_TIME_SCALE) != 0u)
     {
@@ -822,6 +821,9 @@ static void pwr_engine_apply_pending_locked(PWR_Engine* e)
         e->cfg.scan_rate_rpm = scan_rpm;
         (void)pwr_config_derive(&e->cfg, &e->dm);
         e->dm.range_bins = e->n_range;
+        /* The scan rate sets the scan-modulation half of the clutter spectrum,
+         * so turning the antenna faster has to widen it here and now. */
+        pwr_sim_update_clutter_rho(&e->sim, &e->cfg);
         pwr_engine_check_dwell(e);
     }
     if ((flags & PWR_PENDING_STC) != 0u)
@@ -1441,6 +1443,11 @@ PWR_EXPORT(PWR_Status) pwr_engine_set_environment(PWR_Engine* eng,
     pwr_mutex_lock(&eng->pending_lock);
     eng->pending_env = *env;
     eng->pending_env.sea_state = pwr_clampd(env->sea_state, 0.0, 9.0);
+    /* A zeroed environment struct means "standard atmosphere", not "flat
+     * earth": the simulator applies the same reading, so the two cannot
+     * disagree about what an unset refractivity means. */
+    eng->pending_env.refraction_k = (env->refraction_k > 0.1)
+        ? pwr_clampd(env->refraction_k, 0.5, 6.0) : (4.0 / 3.0);
     eng->pending_flags |= PWR_PENDING_ENV;
     pwr_mutex_unlock(&eng->pending_lock);
     pwr_engine_try_apply_pending(eng);
@@ -1475,9 +1482,12 @@ PWR_EXPORT(PWR_Status) pwr_engine_target_add(PWR_Engine* eng, PWR_SimTarget* tgt
         }
         tgt->label[PWR_LABEL_LEN - 1u] = '\0';
         eng->sim.targets[k] = *tgt;
-        eng->sim.state[k].x = tgt->x_m;
-        eng->sim.state[k].y = tgt->y_m;
-        eng->sim.state[k].z = tgt->z_m;
+        eng->sim.state[k].x  = tgt->x_m;
+        eng->sim.state[k].y  = tgt->y_m;
+        eng->sim.state[k].z  = tgt->z_m;
+        eng->sim.state[k].vx = tgt->vx_mps;
+        eng->sim.state[k].vy = tgt->vy_mps;
+        eng->sim.state[k].vz = tgt->vz_mps;
         eng->sim.state[k].amp_scale = 1.0;
         eng->sim.state[k].next_scan_update_s = 0.0;
         eng->sim.state[k].active = 0;
@@ -1510,6 +1520,11 @@ PWR_EXPORT(PWR_Status) pwr_engine_target_update(PWR_Engine* eng,
                 eng->sim.state[i].y = tgt->y_m;
                 eng->sim.state[i].z = tgt->z_m;
             }
+            /* A velocity written through the API replaces the propagated one;
+             * otherwise a manoeuvring target would ignore the edit. */
+            eng->sim.state[i].vx = tgt->vx_mps;
+            eng->sim.state[i].vy = tgt->vy_mps;
+            eng->sim.state[i].vz = tgt->vz_mps;
         }
         st = PWR_STATUS_OK;
         break;

@@ -27,6 +27,7 @@
 
 #include <math.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -92,11 +93,41 @@ static void install_interrupt_handlers(void)
 #endif
 }
 
+/* --------------------------------------------------------------------------
+ *  Visible fatal errors
+ *  --------------------
+ *  Every way this program can refuse to start ends in a message on stderr, and
+ *  from a shell that is exactly right.  Launched from Explorer or from a build
+ *  script's `start`, it is exactly wrong: the console subsystem opens a window
+ *  that closes the instant the process exits, so the one line explaining why
+ *  nothing appeared is the one line nobody can read.  The symptom is "I ran it
+ *  and no screen came up", which is indistinguishable from a hang.
+ *
+ *  On Windows the same text therefore also goes to a message box, which
+ *  survives the process.
+ * ------------------------------------------------------------------------ */
+static void fatal(const char* fmt, ...)
+{
+    char msg[1024];
+    va_list ap;
+
+    va_start(ap, fmt);
+    (void)vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "PWRadarUI: %s\n", msg);
+#if defined(_WIN32)
+    (void)MessageBoxA(NULL, msg, "PWRadarSystem - cannot start",
+                      MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+#endif
+}
+
 static void print_usage(const char* argv0)
 {
     printf("PWRadarSystem verification console\n"
            "usage: %s [options]\n"
-           "  --selftest       run the PWRadarCore acceptance suite and exit\n"
+           "  --selftest [quick]  run the acceptance suite and exit; 'quick'\n"
+           "                   skips the four cases that integrate over\n"
+           "                   thousands of CPIs, so it finishes in a second\n"
            "  --score [SECS]   score a scenario against ground truth with no\n"
            "                   window and exit; all scenarios unless --scenario\n"
            "                   was given first (default 30 s of scenario time)\n"
@@ -110,10 +141,12 @@ static void print_usage(const char* argv0)
            (argv0 != NULL) ? argv0 : "PWRadarUI");
 }
 
-static int run_selftest(void)
+static int run_selftest(int quick)
 {
     char report[4096];
-    const PWR_Status st = pwr_self_test(report, sizeof(report));
+    const PWR_Status st = (quick != 0)
+        ? pwr_self_test_quick(report, sizeof(report))
+        : pwr_self_test(report, sizeof(report));
     fputs(report, stdout);
     printf("result: %s\n", (st == PWR_STATUS_OK) ? "PASS" : "FAIL");
     return (st == PWR_STATUS_OK) ? 0 : 1;
@@ -405,6 +438,11 @@ int main(int argc, char** argv)
         if (strcmp(argv[i], "--selftest") == 0)
         {
             do_selftest = 1;
+            if (i + 1 < argc && strcmp(argv[i + 1], "quick") == 0)
+            {
+                do_selftest = 2;
+                ++i;
+            }
             continue;
         }
         if (strcmp(argv[i], "--score") == 0)
@@ -454,14 +492,14 @@ int main(int argc, char** argv)
         return 2;
     }
 
-    if (do_selftest != 0) { return run_selftest(); }
+    if (do_selftest != 0) { return run_selftest(do_selftest == 2); }
 
     if (load_path != NULL)
     {
         scenario_text = read_text_file(load_path);
         if (scenario_text == NULL)
         {
-            fprintf(stderr, "cannot read %s\n", load_path);
+            fatal("cannot read the scenario file %s", load_path);
             return 7;
         }
     }
@@ -480,10 +518,12 @@ int main(int argc, char** argv)
 
     if (pwr_abi_version() != (uint32_t)PWR_ABI_VERSION)
     {
-        fprintf(stderr,
-                "PWRadarCore ABI mismatch: this binary was built against %d, "
-                "the library reports %u\n",
-                PWR_ABI_VERSION, pwr_abi_version());
+        fatal("PWRadarCore ABI mismatch: this console was built against "
+              "version %d, the loaded PWRadarCore.dll reports %u.\n\n"
+              "The two came from different builds.  Rebuild both, and check "
+              "that the PWRadarCore.dll being loaded is the one beside this "
+              "executable and not an older copy earlier on PATH.",
+              PWR_ABI_VERSION, pwr_abi_version());
         return 3;
     }
 
@@ -492,8 +532,7 @@ int main(int argc, char** argv)
     err[0] = '\0';
     if (app_create(&app, err, sizeof(err)) == 0)
     {
-        fprintf(stderr, "PWRadarUI: %s\n",
-                (err[0] != '\0') ? err : "initialisation failed");
+        fatal("%s", (err[0] != '\0') ? err : "initialisation failed");
         return 4;
     }
     if (scenario >= 0 && pwr_scenario_name((uint32_t)scenario) != NULL)

@@ -200,9 +200,12 @@ int app_create(App* a, char* err, size_t err_cap)
 
     app_logf(a, "[INFO ] PWRadarCore %s, ABI %u", pwr_version_string(),
              pwr_abi_version());
-    a->selftest_status = pwr_self_test(a->selftest, sizeof(a->selftest));
-    app_logf(a, "[INFO ] self test: %s",
-             (a->selftest_status == PWR_STATUS_OK) ? "all cases passed" : "FAILURES");
+    /* Deferred: see App::selftest_pending.  Running the suite here would hold
+     * the window black for its whole duration, before anything has been drawn
+     * even once. */
+    a->selftest_pending = 1;
+    a->selftest_status  = PWR_STATUS_NO_DATA;
+    (void)snprintf(a->selftest, sizeof(a->selftest), "self test not run yet\n");
 
     a->scenario = 3;                    /* mixed air and surface picture */
     (void)pwr_engine_load_scenario(a->eng, (uint32_t)a->scenario);
@@ -2108,6 +2111,23 @@ int app_step(App* a)
         ui_ctx_event(&a->ui, &ev);
     }
 
+    /* ---- deferred start-up self test -------------------------------------
+     *  The console has now drawn at least once, so there is something on
+     *  screen to look at while this runs.  It is the quick set: the four
+     *  statistical cases integrate over thousands of coherent intervals, which
+     *  belongs in the gate (--selftest, ctest) and not in a start-up path a
+     *  user is waiting on. */
+    if (a->selftest_pending != 0 && a->frames_drawn > 0)
+    {
+        a->selftest_pending = 0;
+        a->selftest_status  = pwr_self_test_quick(a->selftest,
+                                                  sizeof(a->selftest));
+        app_logf(a, "[INFO ] self test (quick): %s",
+                 (a->selftest_status == PWR_STATUS_OK) ? "all cases passed"
+                                                       : "FAILURES");
+        a->need_redraw = 1;
+    }
+
     /* ---- queued single-stepping ------------------------------------------
      *  STEP / +1 SCAN only queue CPIs; they are drained here with a ~20 ms
      *  budget per UI frame, sized from the measured CPI time.  A full-scan
@@ -2317,6 +2337,7 @@ int app_step(App* a)
     ui_frame_end(&a->ui);
     ui_plat_set_cursor(a->plat, a->ui.cursor);
     ui_plat_present(a->plat);
+    if (a->frames_drawn < 1000000) { ++a->frames_drawn; }
 
     /* ---- deferred reconfiguration --------------------------------------- */
     if (a->cfg_dirty != 0 && a->ui.active == 0u && a->ui.edit_id == 0u)

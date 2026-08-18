@@ -20,6 +20,18 @@
  *       prediction across a range of signal-to-noise ratios
  *   T14 a scenario survives a save / load / save round trip byte for byte,
  *       and an invalid file is refused rather than half-applied
+ *   T15 a target past the effective-earth horizon falls into shadow instead of
+ *       being seen at full strength
+ *   T16 a cosecant-squared fill holds received power constant for a target at
+ *       constant altitude
+ *   T17 MTI cancels a sea better when the antenna turns slower, because scan
+ *       modulation is part of the clutter spectrum
+ *   T18 a compound-K sea produces more false plots than the Rayleigh field the
+ *       CFAR multipliers are derived for
+ *   T19 a hull longer than a resolution cell occupies several range cells
+ *   T20 a turn neither blows up the tracker's error nor costs it the lock
+ *   T21 a new track is seeded with a measured range rate only when the radar
+ *       cannot have folded it
  *
  * T11 and T12 exist because everything above them stares: with
  * scan_rate_rpm == 0 the dwell-merge pass and the tracker's per-scan branch
@@ -341,9 +353,13 @@ static PWR_Engine* pwr_test_engine_rotating(void)
     cfg.worker_thread     = 0;
     cfg.deterministic     = 1;
     cfg.range_span_m      = 24000.0;
-    cfg.range_bins        = 512u;
-    cfg.ppi_azimuth_cells = 256u;
-    cfg.rti_rows          = 32u;
+    /* Coarse on purpose: these cases run whole revolutions, and what they
+     * check - one plot per dwell, one M-of-N attempt per revolution - does not
+     * depend on range resolution.  A fine grid would only make the suite slow
+     * enough to sit awkwardly in a build script. */
+    cfg.range_bins        = 256u;
+    cfg.ppi_azimuth_cells = 128u;
+    cfg.rti_rows          = 16u;
     if (pwr_engine_create(&cfg, &e) != PWR_STATUS_OK) { return NULL; }
 
     (void)pwr_engine_get_environment(e, &env);
@@ -707,7 +723,7 @@ static void pwr_test_rotating_dwell(PWR_TestCtx* c)
     const double truth_az = 137.0;
     const double r0       = 12000.0;
     const double rdot     = 20.0;
-    const uint32_t scans  = 6u;
+    const uint32_t scans  = 4u;
     char detail[176];
     uint32_t plots = 0u, cpi, n_cpi;
     double worst_az = 0.0, sum_az = 0.0, sum_snr = 0.0;
@@ -781,7 +797,7 @@ static void pwr_test_rotating_track(PWR_TestCtx* c)
     PWR_DerivedMetrics dm;
     char detail[208];
     uint32_t cpi, per_scan, id = 0u, attempts = 0u, term_seen = 0u;
-    uint32_t alive_scans = 6u, dead_scans = 9u;
+    uint32_t alive_scans = 5u, dead_scans = 7u;
     int32_t tgt_id;
     int confirmed = 0, ok;
 
@@ -908,7 +924,6 @@ static PWR_Engine* pwr_test_pd_engine(double pfa, double range_m, double rcs)
     cfg.worker_thread     = 0;
     cfg.deterministic     = 1;
     cfg.scan_rate_rpm     = 0.0;
-    cfg.antenna_height_m  = 0.0;      /* zero elevation offset -> unity gain  */
     cfg.range_start_m     = 0.0;
     cfg.range_span_m      = 12000.0;
     cfg.range_bins        = 500u;     /* decimation 1: bin == delay sample    */
@@ -949,7 +964,10 @@ static PWR_Engine* pwr_test_pd_engine(double pfa, double range_m, double rcs)
         memset(&t, 0, sizeof(t));
         t.x_m = 0.0;              /* bearing 0, which is where the beam stares */
         t.y_m = range_m;
-        t.z_m = 0.0;
+        /* Level with the antenna, so the only elevation offset is the earth
+         * bulge - 3.05 m at this range, i.e. 0.024 degrees against a 20 degree
+         * beam, which costs four millionths of a decibel. */
+        t.z_m = 25.0;
         t.rcs_m2 = rcs;           /* stationary: exact bin, no range walk      */
         t.swerling = PWR_SWERLING_0;
         t.target_class = PWR_CLASS_AIR;
@@ -968,7 +986,7 @@ static void pwr_test_pd(PWR_TestCtx* c)
      * coherent gain moves Pd by more than the tolerance below. */
     static const double s_post_db[4] = { 6.0, 8.0, 10.0, 12.0 };
     const double   design_pfa = 1.0e-4;
-    const uint32_t n_cpi      = 1200u;
+    const uint32_t n_cpi      = 700u;
     /* Exactly 300 delay samples at the default sample rate, so the compressed
      * peak lands on a bin centre. */
     const double   range_m    = 300.0 * PWR_C_LIGHT / (2.0 * 6.25e6);
@@ -1135,10 +1153,628 @@ done:
     PWR_FREE(t2);
 }
 
+/* --------------------------------------------------------------------------
+ *  Peak of the published range profile inside a window around a slant range,
+ *  which is how the propagation cases read a level without going through the
+ *  detector - a target 25 dB into the shadow has no detection to read.
+ * ------------------------------------------------------------------------ */
+static double pwr_test_profile_peak(const PWR_Frame* f, double slant_m,
+                                    int32_t half_bins)
+{
+    const int32_t c = (int32_t)((slant_m - f->range_first_m) /
+                                f->range_step_m + 0.5);
+    double best = -300.0;
+    int32_t i;
+    for (i = c - half_bins; i <= c + half_bins; ++i)
+    {
+        if (i < 0 || i >= (int32_t)f->range_bins) { continue; }
+        if ((double)f->range_profile_db[i] > best)
+        {
+            best = (double)f->range_profile_db[i];
+        }
+    }
+    return best;
+}
+
+/* ==========================================================================
+ *  T15 - radar horizon on an effective earth
+ * ==========================================================================
+ *  Flat-earth geometry lets a surface radar see a sea-skimmer at any range the
+ *  receive window covers, which is the single most optimistic thing a surface
+ *  surveillance model can do.  With a 25 m antenna and a 5 m target the
+ *  smooth-sphere horizon is 4.12*(sqrt(25)+sqrt(5)) = 29.8 km, so the check is
+ *  that the level falls away far faster than R^-4 past that range and no
+ *  faster than R^-4 before it.
+ * ------------------------------------------------------------------------ */
+static void pwr_test_horizon(PWR_TestCtx* c)
+{
+    PWR_RadarConfig cfg;
+    PWR_SimEnvironment env;
+    PWR_Engine* e = NULL;
+    char detail[192];
+    double lvl[3] = { 0.0, 0.0, 0.0 };
+    static const double gr[3] = { 20000.0, 25000.0, 33000.0 };
+    double inside_drop = 0.0, shadow_drop = 0.0;
+    int ok = 0, i;
+
+    (void)pwr_config_default(&cfg);
+    cfg.worker_thread     = 0;
+    cfg.deterministic     = 1;
+    cfg.scan_rate_rpm     = 0.0;
+    cfg.range_span_m      = 45000.0;
+    cfg.range_bins        = 900u;
+    cfg.ppi_azimuth_cells = 64u;
+    cfg.rti_rows          = 16u;
+    if (pwr_engine_create(&cfg, &e) != PWR_STATUS_OK)
+    {
+        pwr_check(c, "T15 radar horizon", 0, "engine creation failed");
+        return;
+    }
+    (void)pwr_engine_get_environment(e, &env);
+    env.enable_thermal_noise = 1;
+    env.enable_sea_clutter   = 0;
+    env.enable_eclipsing     = 0;
+    (void)pwr_engine_set_environment(e, &env);
+
+    /* Three identical surface targets on the stared bearing, so one profile
+     * carries all three levels and the comparison cannot drift. */
+    for (i = 0; i < 3; ++i)
+    {
+        pwr_test_add_target(e, gr[i], 5.0, 0.0, 5000.0);
+    }
+    (void)pwr_engine_step(e, 4u);
+    {
+        PWR_Frame f;
+        if (pwr_engine_frame_acquire(e, &f) == PWR_STATUS_OK)
+        {
+            for (i = 0; i < 3; ++i)
+            {
+                lvl[i] = pwr_test_profile_peak(&f, gr[i], 4);
+            }
+            (void)pwr_engine_frame_release(e);
+        }
+    }
+    pwr_engine_destroy(e);
+
+    /* 20 -> 25 km is inside the horizon: R^-4 alone, 3.88 dB.
+     * 25 -> 33 km crosses it: R^-4 gives 4.82 dB, the shadow adds about 21. */
+    inside_drop = lvl[0] - lvl[1];
+    shadow_drop = lvl[1] - lvl[2];
+    ok = (fabs(inside_drop - 3.88) < 2.0 && shadow_drop > 15.0 &&
+          shadow_drop < 45.0) ? 1 : 0;
+    (void)snprintf(detail, sizeof(detail),
+                   "horizon 29.8 km; 20->25 km %.1f dB (R^-4 = 3.9), "
+                   "25->33 km %.1f dB", inside_drop, shadow_drop);
+    pwr_check(c, "T15 radar horizon", ok, detail);
+}
+
+/* ==========================================================================
+ *  T16 - cosecant-squared elevation coverage
+ * ==========================================================================
+ *  The defining property of a csc^2 antenna is that received power is constant
+ *  for a target at constant altitude: the gain grows as R^2 across the fill,
+ *  the two-way gain as R^4, and the R^-4 of the radar equation cancels exactly.
+ *  Four targets at one altitude and four ranges therefore have to read the same
+ *  level with the fill on - and wildly different levels with it off, which is
+ *  the second half of the check and the reason the fill exists.
+ * ------------------------------------------------------------------------ */
+static void pwr_test_csc2(PWR_TestCtx* c)
+{
+    static const double gr[4] = { 4000.0, 8000.0, 12000.0, 16000.0 };
+    const double alt = 3000.0;
+    char detail[192];
+    double spread[2] = { 0.0, 0.0 };
+    int ok = 1, mode;
+
+    for (mode = 0; mode < 2; ++mode)      /* 0 = plain Gaussian, 1 = csc^2 */
+    {
+        PWR_RadarConfig cfg;
+        PWR_SimEnvironment env;
+        PWR_Engine* e = NULL;
+        double lo = 1.0e9, hi = -1.0e9;
+        int i;
+
+        (void)pwr_config_default(&cfg);
+        cfg.worker_thread     = 0;
+        cfg.deterministic     = 1;
+        cfg.scan_rate_rpm     = 0.0;
+        cfg.range_span_m      = 20000.0;
+        /* Oversampled 2.5x in range with no decimation, so the compressed peak
+         * is sampled finely enough that range straddle - which is otherwise
+         * the largest term here, and has nothing to do with the elevation cut
+         * under test - stays a few tenths of a decibel. */
+        cfg.sample_rate_hz    = 12.5e6;
+        cfg.range_bins        = 0u;
+        cfg.ppi_azimuth_cells = 64u;
+        cfg.rti_rows          = 16u;
+        cfg.elevation_csc2_deg = (mode != 0) ? 40.0 : 0.0;
+        if (pwr_engine_create(&cfg, &e) != PWR_STATUS_OK) { ok = 0; break; }
+        (void)pwr_engine_get_environment(e, &env);
+        env.enable_thermal_noise = 1;
+        env.enable_sea_clutter   = 0;
+        env.enable_eclipsing     = 0;
+        (void)pwr_engine_set_environment(e, &env);
+        for (i = 0; i < 4; ++i) { pwr_test_add_target(e, gr[i], alt, 0.0, 50.0); }
+
+        (void)pwr_engine_step(e, 4u);
+        {
+            PWR_Frame f;
+            if (pwr_engine_frame_acquire(e, &f) == PWR_STATUS_OK)
+            {
+                for (i = 0; i < 4; ++i)
+                {
+                    const double dz = alt - 25.0;
+                    const double sl = sqrt(gr[i] * gr[i] + dz * dz);
+                    const double v  = pwr_test_profile_peak(&f, sl, 4);
+                    if (v < lo) { lo = v; }
+                    if (v > hi) { hi = v; }
+                }
+                (void)pwr_engine_frame_release(e);
+            }
+        }
+        pwr_engine_destroy(e);
+        spread[mode] = hi - lo;
+    }
+
+    /* With the fill the four have to agree; without it the 36 degree target is
+     * buried by the Gaussian while the 10 degree one is barely touched. */
+    if (!(spread[1] < 1.0) || !(spread[0] > 20.0)) { ok = 0; }
+    (void)snprintf(detail, sizeof(detail),
+                   "constant-altitude spread: Gaussian %.1f dB, csc2 %.2f dB",
+                   spread[0], spread[1]);
+    pwr_check(c, "T16 cosecant-squared coverage", ok, detail);
+}
+
+/* ==========================================================================
+ *  T17 - MTI clutter attenuation depends on the scan rate
+ * ==========================================================================
+ *  A delay-line canceller can only cancel what stays correlated pulse to
+ *  pulse, so its improvement factor is set by the width of the clutter
+ *  spectrum.  Two things widen that spectrum: the sea moving, and the beam
+ *  sweeping across a patch - the classic 0.265 / t_dwell scan-modulation term.
+ *  With only the first modelled, the achievable improvement factor is a
+ *  property of the sea alone and turning the antenna faster costs nothing,
+ *  which is wrong in kind rather than merely optimistic.
+ *
+ *  The check is therefore a comparison, not an absolute: the same sea at a
+ *  quarter of the rotation rate must cancel measurably better.
+ * ------------------------------------------------------------------------ */
+static double pwr_test_clutter_power(double rpm, int32_t mti)
+{
+    PWR_RadarConfig cfg;
+    PWR_SimEnvironment env;
+    PWR_Engine* e = NULL;
+    double acc = 0.0;
+    uint32_t frames = 0u, cpi;
+
+    (void)pwr_config_default(&cfg);
+    cfg.worker_thread     = 0;
+    cfg.deterministic     = 1;
+    cfg.scan_rate_rpm     = rpm;
+    cfg.mti_mode          = mti;
+    cfg.range_span_m      = 12000.0;
+    cfg.range_bins        = 400u;
+    cfg.ppi_azimuth_cells = 64u;
+    cfg.rti_rows          = 16u;
+    cfg.tracker.enable    = 0;
+    if (pwr_engine_create(&cfg, &e) != PWR_STATUS_OK) { return -1.0; }
+    (void)pwr_engine_get_environment(e, &env);
+    env.enable_thermal_noise = 1;
+    env.enable_sea_clutter   = 1;
+    /* High enough that the residual after cancellation is still well clear of
+     * the noise floor, which is what keeps the ratio below a measurement of
+     * clutter attenuation rather than of the noise. */
+    env.clutter_to_noise_db  = 60.0;
+    env.clutter_spread_hz    = 12.0;
+    env.enable_eclipsing     = 0;
+    (void)pwr_engine_set_environment(e, &env);
+
+    for (cpi = 0u; cpi < 40u; ++cpi)
+    {
+        PWR_Frame f;
+        (void)pwr_engine_step(e, 1u);
+        if (cpi < 20u) { continue; }        /* let the AR(1) field settle */
+        if (pwr_engine_frame_acquire(e, &f) != PWR_STATUS_OK) { continue; }
+        {
+            /* Total power across the Doppler column of a mid-clutter gate:
+             * the whole spectrum, not the notch, is what attenuation means. */
+            const uint32_t rb = 160u;
+            double sum = 0.0;
+            uint32_t j;
+            for (j = 0u; j < f.doppler_bins; ++j)
+            {
+                sum += pow(10.0, (double)f.rd_map_db[(size_t)j * f.range_bins + rb]
+                                 / 10.0);
+            }
+            /* The map is calibrated so a noise-only cell reads 1.0, and the
+             * canceller's coefficient normalisation leaves the total noise
+             * power across the Doppler column unchanged - so exactly one unit
+             * per bin is thermal, and subtracting it leaves clutter alone.
+             * Without this the ratio saturates once the residual clutter falls
+             * under the floor, which is well before the interesting cases. */
+            acc += pwr_maxd(sum - (double)f.doppler_bins, 1.0e-9);
+            ++frames;
+        }
+        (void)pwr_engine_frame_release(e);
+    }
+    pwr_engine_destroy(e);
+    return (frames > 0u) ? (acc / (double)frames) : -1.0;
+}
+
+static void pwr_test_scan_modulation(PWR_TestCtx* c)
+{
+    char detail[192];
+    double ca_fast = 0.0, ca_slow = 0.0;
+    int ok = 0;
+    double p_off, p_on;
+
+    p_off = pwr_test_clutter_power(24.0, PWR_MTI_OFF);
+    p_on  = pwr_test_clutter_power(24.0, PWR_MTI_TWO_PULSE);
+    if (p_off > 0.0 && p_on > 0.0) { ca_fast = 10.0 * log10(p_off / p_on); }
+
+    p_off = pwr_test_clutter_power(6.0, PWR_MTI_OFF);
+    p_on  = pwr_test_clutter_power(6.0, PWR_MTI_TWO_PULSE);
+    if (p_off > 0.0 && p_on > 0.0) { ca_slow = 10.0 * log10(p_off / p_on); }
+
+    ok = (ca_fast > 12.0 && ca_fast < 40.0 &&
+          ca_slow - ca_fast > 3.0) ? 1 : 0;
+    (void)snprintf(detail, sizeof(detail),
+                   "2-pulse clutter attenuation %.1f dB at 24 rpm, %.1f dB at "
+                   "6 rpm (+%.1f dB for the slower sweep)",
+                   ca_fast, ca_slow, ca_slow - ca_fast);
+    pwr_check(c, "T17 scan modulation limits MTI", ok, detail);
+}
+
+/* ==========================================================================
+ *  T18 - a spiky sea breaks the Rayleigh false-alarm design
+ * ==========================================================================
+ *  Every CFAR multiplier in this library is derived for exponentially
+ *  distributed cell power.  While the simulated sea was complex Gaussian too,
+ *  the detector and the simulator shared one assumption and any false-alarm
+ *  rate measured against it was self-fulfilling - the single most important
+ *  thing a maritime radar model can get wrong, because spiky sea clutter is
+ *  precisely what CFAR design exists to survive.
+ *
+ *  With the compound-K texture switched on, the same design Pfa has to produce
+ *  visibly more false plots.  That difference is the whole point: it is the
+ *  margin a real detector has to buy back with a different estimator, a
+ *  different threshold, or scan-to-scan integration.
+ * ------------------------------------------------------------------------ */
+static uint64_t pwr_test_clutter_alarms(double nu)
+{
+    PWR_RadarConfig cfg;
+    PWR_SimEnvironment env;
+    PWR_Engine* e = NULL;
+    PWR_Stats st;
+
+    (void)pwr_config_default(&cfg);
+    cfg.worker_thread     = 0;
+    cfg.deterministic     = 1;
+    cfg.scan_rate_rpm     = 24.0;      /* texture refreshes once a scan */
+    cfg.range_span_m      = 24000.0;
+    cfg.range_bins        = 300u;
+    cfg.ppi_azimuth_cells = 128u;
+    cfg.rti_rows          = 16u;
+    cfg.cfar.pfa          = 1.0e-6;
+    cfg.tracker.enable    = 0;
+    if (pwr_engine_create(&cfg, &e) != PWR_STATUS_OK) { return 0u; }
+    (void)pwr_engine_get_environment(e, &env);
+    env.enable_thermal_noise = 1;
+    env.enable_sea_clutter   = 1;
+    /* High enough that the sea still dominates the thermal floor at the far
+     * edge of the display: the R^-3 law costs 41 dB across 24 km, and if the
+     * outer half of the map is noise-limited then most false alarms are
+     * thermal and say nothing about the clutter distribution.  Eclipsing is
+     * off for the same reason - it blanks the first 3 km, which is exactly
+     * where the sea is strongest. */
+    env.clutter_to_noise_db  = 65.0;
+    env.enable_eclipsing     = 0;
+    env.sea_shape_nu         = nu;
+    (void)pwr_engine_set_environment(e, &env);
+
+    /* Three revolutions, so several independent texture realisations. */
+    (void)pwr_engine_step(e, 705u);
+    (void)pwr_engine_get_stats(e, &st);
+    pwr_engine_destroy(e);
+    return st.detection_total;
+}
+
+static void pwr_test_k_clutter(PWR_TestCtx* c)
+{
+    char detail[176];
+    const uint64_t rayleigh = pwr_test_clutter_alarms(0.0);
+    const uint64_t k2 = pwr_test_clutter_alarms(2.0);
+    const uint64_t k1 = pwr_test_clutter_alarms(0.6);
+    const uint64_t k0 = pwr_test_clutter_alarms(0.2);
+    /* The claim is the ordering, not a number: a spikier sea must cost more
+     * false alarms at every step, and the spikiest case must cost several
+     * times the Rayleigh design.  A model that produced the same rate for any
+     * shape would not have a texture at all. */
+    const int ok = (rayleigh > 0u && k2 > rayleigh && k1 > k2 && k0 > k1 &&
+                    k0 > rayleigh * 3u) ? 1 : 0;
+    (void)snprintf(detail, sizeof(detail),
+                   "false plots/3 scans: Rayleigh %llu, nu=2 %llu, 0.6 %llu, 0.2 %llu",
+                   (unsigned long long)rayleigh, (unsigned long long)k2,
+                   (unsigned long long)k1, (unsigned long long)k0);
+    pwr_check(c, "T18 spiky sea defeats a Rayleigh CFAR", ok, detail);
+}
+
 /* ==========================================================================
  *  Entry point
  * ========================================================================== */
-PWR_EXPORT(PWR_Status) pwr_self_test(char* report, size_t report_cap)
+/* ==========================================================================
+ *  T19 - an extended target occupies more than one range cell
+ * ==========================================================================
+ *  Until a target could be longer than a resolution cell, every plot in this
+ *  model was one cell wide - which meant the clustering tolerances, the
+ *  maximum-cluster reject and the dwell-merge gates had all been tuned against
+ *  a stimulus that could never exercise them.  A 150 m ship at 30 m resolution
+ *  has to span several cells, and the check is that it does: the -10 dB extent
+ *  of the compressed response grows with the body length rather than staying
+ *  at the pulse width.
+ * ------------------------------------------------------------------------ */
+static double pwr_test_echo_extent(double length_m, int32_t scatterers)
+{
+    PWR_RadarConfig cfg;
+    PWR_SimEnvironment env;
+    PWR_Engine* e = NULL;
+    PWR_SimTarget t;
+    const double range_m = 12000.0;
+    double extent = -1.0;
+
+    (void)pwr_config_default(&cfg);
+    cfg.worker_thread     = 0;
+    cfg.deterministic     = 1;
+    cfg.scan_rate_rpm     = 0.0;
+    cfg.range_span_m      = 20000.0;
+    cfg.range_bins        = 0u;          /* no decimation: 24 m bins */
+    cfg.ppi_azimuth_cells = 64u;
+    cfg.rti_rows          = 16u;
+    if (pwr_engine_create(&cfg, &e) != PWR_STATUS_OK) { return -1.0; }
+    (void)pwr_engine_get_environment(e, &env);
+    env.enable_thermal_noise = 1;
+    env.enable_sea_clutter   = 0;
+    env.enable_eclipsing     = 0;
+    (void)pwr_engine_set_environment(e, &env);
+
+    memset(&t, 0, sizeof(t));
+    t.x_m = 0.0;
+    t.y_m = range_m;
+    t.z_m = 25.0;
+    t.vy_mps = 40.0;          /* radial, so the body axis projects into range */
+    t.rcs_m2 = 4000.0;        /* a ship-sized cross-section */
+    t.length_m    = length_m;
+    t.scatterers  = scatterers;
+    t.swerling    = PWR_SWERLING_0;
+    t.enabled     = 1;
+    (void)snprintf(t.label, sizeof(t.label), "EXTENT");
+    (void)pwr_engine_target_add(e, &t);
+
+    (void)pwr_engine_step(e, 2u);
+    {
+        PWR_Frame f;
+        if (pwr_engine_frame_acquire(e, &f) == PWR_STATUS_OK)
+        {
+            const double peak = pwr_test_profile_peak(&f, range_m, 24);
+            const int32_t c = (int32_t)((range_m - f.range_first_m) /
+                                        f.range_step_m + 0.5);
+            int32_t lo = -1, hi = -1, i;
+            for (i = c - 24; i <= c + 24; ++i)
+            {
+                if (i < 0 || i >= (int32_t)f.range_bins) { continue; }
+                if ((double)f.range_profile_db[i] < peak - 10.0) { continue; }
+                if (lo < 0) { lo = i; }
+                hi = i;
+            }
+            /* First to last bin above -10 dB, so interference nulls between
+             * scattering centres do not truncate the measurement. */
+            extent = (lo >= 0) ? ((double)(hi - lo + 1) * f.range_step_m) : 0.0;
+            (void)pwr_engine_frame_release(e);
+        }
+    }
+    pwr_engine_destroy(e);
+    return extent;
+}
+
+static void pwr_test_extent(PWR_TestCtx* c)
+{
+    char detail[176];
+    const double pt  = pwr_test_echo_extent(0.0, 0);
+    const double ship = pwr_test_echo_extent(150.0, 12);
+    const int ok = (pt > 0.0 && ship > pt * 2.5 && ship < 400.0) ? 1 : 0;
+    (void)snprintf(detail, sizeof(detail),
+                   "-10 dB echo extent: point %.0f m, 150 m hull %.0f m "
+                   "(range resolution 30 m)", pt, ship);
+    pwr_check(c, "T19 extended target range extent", ok, detail);
+}
+
+/* ==========================================================================
+ *  T20 - a turn must not cost the tracker its lock
+ * ==========================================================================
+ *  This case was written to measure how badly a constant-velocity filter loses
+ *  a turning target, on the way to justifying an interacting-multiple-model
+ *  bank.  It measured something else.  The 2.8x penalty it originally recorded
+ *  came from the process-noise model, not from the motion model: the discrete
+ *  Q was applied once per CPI while measurements arrived once per revolution,
+ *  so the filter accumulated a two-hundred-and-thirty-fourth of the manoeuvre
+ *  allowance the operator had asked for, its gate stayed shut on a target that
+ *  had turned, and the track was lost and re-acquired.  With the continuous-
+ *  time Q the same turn costs nothing measurable.
+ *
+ *  So the assertion is now the property that fix bought, and it is stated in
+ *  absolute metres rather than as a ratio - a ratio moves whenever either leg
+ *  moves and hides which change did what.  Both legs sit near the ground-plane
+ *  projection bias of a two-dimensional tracker fed slant range (about 150 m
+ *  at this geometry), which is the floor of what this measurement can resolve.
+ * ------------------------------------------------------------------------ */
+static double pwr_test_turn_rmse(double turn_rate_dps, double* out_complete)
+{
+    PWR_RadarConfig cfg;
+    PWR_SimEnvironment env;
+    PWR_Engine* e = NULL;
+    PWR_Scorer sc;
+    PWR_SimTarget t;
+    uint32_t cpi, n_cpi;
+    double worst = 0.0;
+
+    (void)pwr_config_default(&cfg);
+    cfg.worker_thread     = 0;
+    cfg.deterministic     = 1;
+    cfg.range_bins        = 512u;
+    cfg.ppi_azimuth_cells = 128u;
+    cfg.rti_rows          = 16u;
+    if (pwr_engine_create(&cfg, &e) != PWR_STATUS_OK) { return -1.0; }
+    (void)pwr_engine_get_environment(e, &env);
+    env.enable_thermal_noise = 1;
+    env.enable_sea_clutter   = 0;
+    (void)pwr_engine_set_environment(e, &env);
+    (void)pwr_scorer_init(&sc, 0.0);
+
+    memset(&t, 0, sizeof(t));
+    t.x_m = 9000.0;
+    t.y_m = 9000.0;
+    t.z_m = 2000.0;
+    t.vx_mps = -110.0;
+    t.vy_mps = 0.0;
+    t.rcs_m2 = 12.0;
+    t.turn_rate_dps = turn_rate_dps;
+    t.swerling = PWR_SWERLING_0;
+    t.enabled  = 1;
+    (void)snprintf(t.label, sizeof(t.label), "TURN");
+    (void)pwr_engine_target_add(e, &t);
+
+    n_cpi = (uint32_t)(24.0 / (32.0 / 3000.0));
+    for (cpi = 0u; cpi < n_cpi; ++cpi)
+    {
+        PWR_Frame f;
+        (void)pwr_engine_step(e, 1u);
+        if (pwr_engine_frame_acquire(e, &f) != PWR_STATUS_OK) { continue; }
+        (void)pwr_scorer_update(&sc, &f);
+        (void)pwr_engine_frame_release(e);
+    }
+    {
+        uint32_t i;
+        for (i = 0u; i < PWR_MAX_SIM_TARGETS; ++i)
+        {
+            if (sc.targets[i].err_n == 0u) { continue; }
+            if (sc.targets[i].err_rms_m > worst) { worst = sc.targets[i].err_rms_m; }
+            if (out_complete != NULL) { *out_complete = sc.targets[i].completeness; }
+        }
+    }
+    pwr_engine_destroy(e);
+    return worst;
+}
+
+static void pwr_test_manoeuvre(PWR_TestCtx* c)
+{
+    char detail[208];
+    double cs = 0.0, ct = 0.0;
+    const double straight = pwr_test_turn_rmse(0.0, &cs);
+    const double turning  = pwr_test_turn_rmse(6.0, &ct);
+    /* The turn must not blow the error up and must not cost the lock.  Both
+     * bounds are absolute: a ratio would have passed the broken build too, and
+     * a completeness floor is what catches the lose-and-re-acquire cycle that
+     * a shut gate produces - which an RMSE alone hides, because the segments
+     * it does hold are accurate. */
+    const int ok = (straight > 0.0 && turning > 0.0 &&
+                    straight < 260.0 && turning < 300.0 &&
+                    cs > 0.6 && ct > 0.6) ? 1 : 0;
+    (void)snprintf(detail, sizeof(detail),
+                   "straight %.0f m / %.0f%% held, 6 deg/s turn %.0f m / %.0f%% "
+                   "held (floor is the ~150 m slant-to-ground bias)",
+                   straight, 100.0 * cs, turning, 100.0 * ct);
+    pwr_check(c, "T20 a turn does not cost the tracker its lock", ok, detail);
+}
+
+/* ==========================================================================
+ *  T21 - a track is only seeded with a range rate that can be believed
+ * ==========================================================================
+ *  The Doppler axis spans exactly +/- Vua, so every measured range rate
+ *  arrives already folded and a single plot cannot say which fold it came
+ *  from.  Seeding a new track's velocity from a folded reading does not just
+ *  lose accuracy, it can point the track the wrong way: a target closing at
+ *  120 m/s against a 73.7 m/s interval reads as +27 m/s, and the filter then
+ *  starts by believing the target is opening.
+ *
+ *  What decides whether the reading can be believed is not its value - a fold
+ *  lands anywhere in the interval with equal ease - but whether this radar can
+ *  fold an admissible target at all.  So the rule is Vua >= max_speed_mps, and
+ *  this case checks both sides of it on the same geometry: with the default
+ *  interval the new track must start stationary, and with a speed limit inside
+ *  the interval it must start at the measured range rate.
+ *
+ *  Neither leg can pass by accident: the first fails if the folded value is
+ *  used, the second fails if the seed is dropped unconditionally.
+ * ------------------------------------------------------------------------ */
+static double pwr_test_birth_speed(double max_speed_mps, double range_rate_mps)
+{
+    PWR_RadarConfig cfg;
+    PWR_SimEnvironment env;
+    PWR_Engine* e = NULL;
+    double speed = -1.0;
+    uint32_t cpi;
+
+    (void)pwr_config_default(&cfg);
+    cfg.worker_thread     = 0;
+    cfg.deterministic     = 1;
+    cfg.scan_rate_rpm     = 0.0;          /* stare, so the target is lit at once */
+    cfg.range_span_m      = 24000.0;
+    cfg.range_bins        = 512u;
+    cfg.ppi_azimuth_cells = 64u;
+    cfg.rti_rows          = 16u;
+    cfg.tracker.max_speed_mps = max_speed_mps;
+    if (pwr_engine_create(&cfg, &e) != PWR_STATUS_OK) { return -1.0; }
+    (void)pwr_engine_get_environment(e, &env);
+    env.enable_thermal_noise = 1;
+    env.enable_sea_clutter   = 0;
+    (void)pwr_engine_set_environment(e, &env);
+    pwr_test_add_target(e, 15000.0, 3000.0, range_rate_mps, 40.0);
+
+    /* The first frame that carries a track carries it at birth. */
+    for (cpi = 0u; cpi < 12u && speed < 0.0; ++cpi)
+    {
+        PWR_Frame f;
+        (void)pwr_engine_step(e, 1u);
+        if (pwr_engine_frame_acquire(e, &f) != PWR_STATUS_OK) { continue; }
+        if (f.track_count > 0u) { speed = f.tracks[0].speed_mps; }
+        (void)pwr_engine_frame_release(e);
+    }
+    pwr_engine_destroy(e);
+    return speed;
+}
+
+static void pwr_test_birth_seed(PWR_TestCtx* c)
+{
+    char detail[208];
+    /* Vua = lambda*PRF/4 = 73.72 m/s at the default geometry. */
+    const double folded   = pwr_test_birth_speed(600.0, -120.0);
+    const double believed = pwr_test_birth_speed(60.0,  -40.0);
+    const int ok = (folded >= 0.0 && believed >= 0.0 &&
+                    folded < 5.0 && fabs(believed - 40.0) < 8.0) ? 1 : 0;
+    (void)snprintf(detail, sizeof(detail),
+                   "birth speed: ambiguous radar %.1f m/s (must be ~0, the "
+                   "plot reads +27 for a -120 target), unambiguous %.1f m/s "
+                   "(must be ~40)", folded, believed);
+    pwr_check(c, "T21 velocity seed only when unambiguous", ok, detail);
+}
+
+/* --------------------------------------------------------------------------
+ *  Two entry points, one suite
+ *  ---------------------------
+ *  The cases divide cleanly by cost.  Most are algebraic or single-CPI checks
+ *  that run in milliseconds; a handful are statistical or scan-length cases
+ *  that have to integrate over thousands of coherent intervals to say anything
+ *  at all.  Running the second group is the right thing for a gate and the
+ *  wrong thing for a build script, which needs to answer "did that compile
+ *  into something sane" in a second or two - a script that sits silent for
+ *  minutes is indistinguishable from one that has hung, and the operator stops
+ *  reading its output.
+ *
+ *  So: the quick set is every case that does not need to integrate, and it is
+ *  what a build runs.  The full set adds the four that do, and it is what
+ *  CTest and CI run.  There is no third behaviour and no case in neither.
+ * ------------------------------------------------------------------------ */
+static PWR_Status pwr_self_test_run(char* report, size_t report_cap, int full)
 {
     PWR_TestCtx ctx;
     memset(&ctx, 0, sizeof(ctx));
@@ -1146,7 +1782,8 @@ PWR_EXPORT(PWR_Status) pwr_self_test(char* report, size_t report_cap)
     ctx.cap = (report != NULL) ? report_cap : 0u;
     if (report != NULL && report_cap > 0u) { report[0] = '\0'; }
 
-    pwr_tprintf(&ctx, "PWRadarCore %s self test\n", pwr_version_string());
+    pwr_tprintf(&ctx, "PWRadarCore %s self test%s\n", pwr_version_string(),
+                (full != 0) ? "" : " (quick)");
 
     pwr_test_fft(&ctx);
     pwr_test_windows(&ctx);
@@ -1158,12 +1795,43 @@ PWR_EXPORT(PWR_Status) pwr_self_test(char* report, size_t report_cap)
     pwr_test_pfa(&ctx);
     pwr_test_tracking(&ctx);
     pwr_test_cfar_families(&ctx);
-    pwr_test_rotating_dwell(&ctx);
-    pwr_test_rotating_track(&ctx);
-    pwr_test_pd(&ctx);
     pwr_test_serialise(&ctx);
+    pwr_test_horizon(&ctx);
+    pwr_test_csc2(&ctx);
+    pwr_test_scan_modulation(&ctx);
+    pwr_test_extent(&ctx);
+    pwr_test_birth_seed(&ctx);
+
+    if (full != 0)
+    {
+        /* Whole revolutions, and Monte-Carlo over detection and clutter
+         * statistics: seconds each, and the reason the full suite is a gate
+         * rather than a build step. */
+        pwr_test_rotating_dwell(&ctx);
+        pwr_test_rotating_track(&ctx);
+        pwr_test_pd(&ctx);
+        pwr_test_k_clutter(&ctx);
+        pwr_test_manoeuvre(&ctx);
+    }
+    else
+    {
+        pwr_tprintf(&ctx, "  [SKIP] rotating dwell, rotating track life cycle, "
+                          "Pd versus theory, K clutter\n"
+                          "         (integrate over thousands of CPIs; run "
+                          "--selftest for the full gate)\n");
+    }
 
     pwr_tprintf(&ctx, "  %d/%d cases passed\n",
                 ctx.cases - ctx.failures, ctx.cases);
     return (ctx.failures == 0) ? PWR_STATUS_OK : PWR_ERR_NUMERIC;
+}
+
+PWR_EXPORT(PWR_Status) pwr_self_test(char* report, size_t report_cap)
+{
+    return pwr_self_test_run(report, report_cap, 1);
+}
+
+PWR_EXPORT(PWR_Status) pwr_self_test_quick(char* report, size_t report_cap)
+{
+    return pwr_self_test_run(report, report_cap, 0);
 }

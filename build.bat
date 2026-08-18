@@ -5,10 +5,13 @@ REM  ------------------------------------------------------------------------
 REM  Generates PWRadarSystem.sln with Visual Studio's own CMake generator,
 REM  builds it, and runs the numerical acceptance suite.
 REM
-REM      build.bat                Release x64
+REM      build.bat                Release x64 - builds and self tests only
 REM      build.bat Debug          Debug x64
-REM      build.bat Release run    build, self test, then launch the console
+REM      build.bat Release run    build, self test, THEN LAUNCH the console
 REM      build.bat clean          delete the build directory
+REM
+REM  Note the third line: without "run" this script never opens a window.  It
+REM  builds and checks, and that is all.
 REM
 REM  After a build you can work in the IDE:  open build\PWRadarSystem.sln
 REM  That solution is generated, so it is guaranteed to load correctly.
@@ -51,9 +54,14 @@ if not exist "%EXE%" goto fail_missing
 
 echo.
 echo ---------------------------------------------------------------------
-echo  Numerical acceptance suite
+echo  Numerical acceptance suite (quick set)
 echo ---------------------------------------------------------------------
-"%EXE%" --selftest
+REM  The quick set is every case that does not have to integrate over
+REM  thousands of coherent intervals - about a second, so a build never sits
+REM  silent long enough to look like it has hung.  The four statistical cases
+REM  it leaves out (rotating dwell and track life cycle, Pd versus theory,
+REM  K-distributed clutter) are the gate, and run under "--selftest" or ctest.
+"%EXE%" --selftest quick
 if errorlevel 1 goto fail_selftest
 
 echo.
@@ -62,9 +70,22 @@ echo  BUILD OK
 echo    executable : %EXE%
 echo    library    : %BUILDDIR%\%CFG%\PWRadarCore.dll
 echo    solution   : %BUILDDIR%\PWRadarSystem.sln
+echo ----------------------------------------------------------------------
+echo  This script does NOT open the console window.  To launch it:
+echo      build.bat %CFG% run
+echo    or run the executable above directly.
+echo  Full acceptance gate (adds the four statistical cases):
+echo      "%EXE%" --selftest
 echo ======================================================================
 
-if /i "%~2"=="run" start "" "%EXE%"
+if /i "%~2"=="run" (
+    echo.
+    echo  launching the console ...
+    start "" "%EXE%"
+) else (
+    echo.
+    echo  [note] no window was opened - pass "run" if you wanted one.
+)
 endlocal
 exit /b 0
 

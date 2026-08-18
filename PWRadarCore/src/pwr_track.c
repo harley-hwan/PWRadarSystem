@@ -3,7 +3,12 @@
  * Four-state constant-velocity filter in a local East-North-Up frame:
  *   X = [x y vx vy]'          metres, metres/second
  *   F = [I dt*I ; 0 I]
- *   Q = discrete white-noise-acceleration, driven by sigma_a
+ *   Q = continuous white-noise-acceleration, driven by sigma_a.  Continuous
+ *       and not discrete because prediction runs every CPI while measurements
+ *       arrive once a revolution: the discrete form draws an independent
+ *       acceleration per step and so does not integrate, leaving the filter
+ *       with a fraction of the manoeuvre allowance that was asked for and
+ *       making that fraction depend on pulses_per_cpi.
  *   H = [I 0]                 Cartesian position measurement
  *
  * A polar detection (R, Az) is converted to Cartesian and its covariance
@@ -211,11 +216,33 @@ void pwr_assign_jv(const double* cost, uint32_t n, uint32_t m,
 /* ==========================================================================
  *  Kalman primitives
  * ========================================================================== */
+/* --------------------------------------------------------------------------
+ *  Prediction, with continuous-time process noise.
+ *
+ *  Q is the continuous white-noise-acceleration form
+ *
+ *      Q = q * [ dt^3/3   dt^2/2 ]      per axis,  q = sigma_a^2
+ *              [ dt^2/2   dt     ]
+ *
+ *  and not the discrete one.  The difference is not cosmetic here, because
+ *  this is called every CPI while measurements arrive once a revolution.  The
+ *  discrete form draws an independent acceleration per step, so it does not
+ *  integrate: over a 2.5 s revisit split into 234 coherent intervals it
+ *  accumulates q*T^2/234 of velocity variance instead of q*T^2 - the filter
+ *  ends a revisit believing its velocity is known to 1 m/s when the operator
+ *  asked for 6 m/s^2 of manoeuvre allowance.  The gate then stays shut on a
+ *  target that has turned, and the track is lost and re-acquired rather than
+ *  held.  Worse, the error is a function of pulses_per_cpi: doubling the CPI
+ *  length silently halved the tracker's manoeuvre tolerance.
+ *
+ *  The continuous form composes exactly across sub-steps - N steps of dt give
+ *  the same covariance as one step of N*dt - so predicting often costs
+ *  nothing and sigma_a means the same thing at any CPI length.
+ * ------------------------------------------------------------------------ */
 static void pwr_kf_predict(PWR_TrackInternal* tk, double dt, double sigma_a)
 {
     const double dt2 = dt * dt;
     const double dt3 = dt2 * dt;
-    const double dt4 = dt2 * dt2;
     const double q   = sigma_a * sigma_a;
     double F[16], T[16], P2[16], Q[16];
     uint32_t i;
@@ -233,10 +260,10 @@ static void pwr_kf_predict(PWR_TrackInternal* tk, double dt, double sigma_a)
     F[15] = 1.0;
 
     memset(Q, 0, sizeof(Q));
-    Q[0]  = q * dt4 / 4.0;  Q[2]  = q * dt3 / 2.0;
-    Q[5]  = q * dt4 / 4.0;  Q[7]  = q * dt3 / 2.0;
-    Q[8]  = q * dt3 / 2.0;  Q[10] = q * dt2;
-    Q[13] = q * dt3 / 2.0;  Q[15] = q * dt2;
+    Q[0]  = q * dt3 / 3.0;  Q[2]  = q * dt2 / 2.0;
+    Q[5]  = q * dt3 / 3.0;  Q[7]  = q * dt2 / 2.0;
+    Q[8]  = q * dt2 / 2.0;  Q[10] = q * dt;
+    Q[13] = q * dt2 / 2.0;  Q[15] = q * dt;
 
     pwr_mat_mul(F, tk->P, T, 4u);        /* T  = F P    */
     pwr_mat_mul_t(T, F, P2, 4u);         /* P2 = F P F' */
@@ -432,7 +459,7 @@ static void pwr_trail_push(PWR_TrackInternal* tk, double time_s)
 static uint32_t pwr_track_init_from_detection(PWR_Tracker* tr,
                                               const PWR_Detection* det,
                                               const PWR_TrackerConfig* cfg,
-                                              double time_s)
+                                              double time_s, double vua)
 {
     uint32_t slot = PWR_MAX_TRACKS;
     uint32_t i;
@@ -451,10 +478,35 @@ static uint32_t pwr_track_init_from_detection(PWR_Tracker* tr,
 
     tk->X[0] = det->range_m * sin(az);
     tk->X[1] = det->range_m * cos(az);
-    /* Seed the velocity with the measured range rate projected on the line of
-     * sight: it is the only velocity information a single plot carries. */
-    tk->X[2] = det->radial_velocity_mps * sin(az);
-    tk->X[3] = det->radial_velocity_mps * cos(az);
+    /* Seed the velocity from the measured range rate projected on the line of
+     * sight - but only when that measurement can be believed.
+     *
+     * The Doppler axis spans exactly +/- Vua, so every range rate arrives
+     * already folded into it and a single plot carries no way to tell which
+     * fold it came from.  Seeding from a folded value does not merely lose
+     * accuracy, it points the track the wrong way: a target closing at
+     * 78 m/s against a 74 m/s unambiguous interval reads as +70 m/s, and the
+     * seed then sends a westbound target north-east.  The filter spends its
+     * first few looks unlearning that, and on a rotating radar a look costs a
+     * whole revolution.
+     *
+     * The measured value itself carries no evidence about which fold it came
+     * from - a folded reading lands anywhere in the interval with equal ease,
+     * so "it is far from the boundary" means nothing.  What can be decided is
+     * whether this *radar* can fold a target the tracker considers plausible
+     * at all: if the unambiguous interval covers max_speed_mps, no admissible
+     * target can have folded and the reading is the truth.  Otherwise it might
+     * be any of several speeds and the only honest seed is none, which is what
+     * init_velocity_sigma is sized to carry.
+     *
+     * At the default geometry (Vua 73.7 m/s against a 600 m/s speed limit)
+     * that means no velocity seed - correctly, because a plot at +27 m/s there
+     * is just as likely to be a target closing at 120. */
+    if (vua >= cfg->max_speed_mps)
+    {
+        tk->X[2] = det->radial_velocity_mps * sin(az);
+        tk->X[3] = det->radial_velocity_mps * cos(az);
+    }
 
     pwr_meas_cov(det->range_m, det->azimuth_deg,
                  cfg->meas_sigma_range_m, cfg->meas_sigma_azimuth_deg, R2);
@@ -915,8 +967,8 @@ void pwr_tracker_update(struct PWR_Engine* e)
                 }
                 if (blocked == 0)
                 {
-                    const uint32_t nid =
-                        pwr_track_init_from_detection(tr, det, cfg, now);
+                    const uint32_t nid = pwr_track_init_from_detection(
+                        tr, det, cfg, now, e->dm.unambiguous_velocity_mps);
                     if (nid != 0u)
                     {
                         e->detections[c].assoc_track_id = (int32_t)nid;

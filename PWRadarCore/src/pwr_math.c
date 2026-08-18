@@ -292,6 +292,49 @@ double pwr_rng_chi2_norm(PWR_Rng* r, uint32_t k)
     return acc / (double)k;
 }
 
+/* Unit-mean Gamma variate of arbitrary shape, by Marsaglia and Tsang's
+ * squeeze method: one normal and one uniform per attempt, and the acceptance
+ * rate is above 95 per cent for every shape.  Shapes below one are handled by
+ * the standard boost, gamma(a) = gamma(a+1) * u^(1/a).
+ *
+ * This is what makes a K-distributed sea possible: the compound model is a
+ * complex Gaussian speckle modulated by a Gamma texture, and the texture is
+ * the half that a Rayleigh-only model has no way to express.  Real shape
+ * parameters are not integers, so a sum of exponentials will not do. */
+double pwr_rng_gamma(PWR_Rng* r, double shape)
+{
+    double a = shape;
+    double boost = 1.0, d, c;
+    int guard;
+
+    if (!(a > 0.0)) { return 1.0; }
+    if (a < 1.0)
+    {
+        boost = pow(pwr_rng_uniform_pos(r), 1.0 / a);
+        a += 1.0;
+    }
+    d = a - 1.0 / 3.0;
+    c = 1.0 / sqrt(9.0 * d);
+    for (guard = 0; guard < 256; ++guard)
+    {
+        const double x = pwr_rng_normal(r);
+        const double t = 1.0 + c * x;
+        double v, u;
+        if (t <= 0.0) { continue; }
+        v = t * t * t;
+        u = pwr_rng_uniform_pos(r);
+        if (u < 1.0 - 0.0331 * x * x * x * x ||
+            log(u) < 0.5 * x * x + d * (1.0 - v + log(v)))
+        {
+            /* d*v is Gamma(a) with unit scale, i.e. mean a; divide by the
+             * requested shape so the texture has unit mean and multiplying by
+             * it leaves the clutter level unchanged. */
+            return d * v * boost / shape;
+        }
+    }
+    return 1.0;
+}
+
 PWR_Complex pwr_rng_cgauss(PWR_Rng* r, double power)
 {
     /* Split the requested total power equally between the I and Q channels. */

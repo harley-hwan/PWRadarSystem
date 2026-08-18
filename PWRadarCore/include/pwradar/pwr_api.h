@@ -284,10 +284,19 @@ PWR_EXPORT(PWR_Status) pwr_fft_inverse(PWR_Complex* data, uint32_t n);
 /** Smallest power of two >= v (v <= 2^31). */
 PWR_EXPORT(uint32_t)   pwr_next_pow2(uint32_t v);
 
-/** Runs the built-in numerical self-test suite (FFT round-trip, pulse
- *  compression peak position, CFAR Pfa, Kalman consistency).  Returns PWR_STATUS_OK
- *  when every case passes; a report is written to @p report when non-NULL. */
+/** Runs the whole built-in numerical self-test suite and returns
+ *  PWR_STATUS_OK when every case passes; a report is written to @p report when
+ *  non-NULL.  This is the gate: it includes the statistical cases - detection
+ *  probability against theory, clutter distributions, whole-revolution track
+ *  behaviour - which integrate over thousands of coherent intervals and take
+ *  seconds each. */
 PWR_EXPORT(PWR_Status) pwr_self_test(char* report, size_t report_cap);
+
+/** The same suite without the four cases that have to integrate, so it
+ *  finishes in about a second.  Every algebraic, calibration and propagation
+ *  check still runs.  This is what a build script should call: fast enough
+ *  that its silence never looks like a hang. */
+PWR_EXPORT(PWR_Status) pwr_self_test_quick(char* report, size_t report_cap);
 
 #ifdef __cplusplus
 } /* extern "C" */
